@@ -213,16 +213,6 @@ auth.users
 
 ---
 
-## Indexes
-
-The schema includes indexes on:
-- Foreign keys for join performance
-- Frequently queried fields (title, release_year, ratings)
-- JSONB columns using GIN indexes
-- Array columns for list memberships
-- Timestamp fields for sorting/filtering
-
----
 
 ## Triggers
 
@@ -232,84 +222,14 @@ The schema includes indexes on:
 
 ---
 
-## Sample Queries
-
-### Get movie with all its ratings
-```sql
-SELECT 
-    m.title,
-    m.release_year,
-    s.name as source,
-    sr.rating,
-    sr.votes
-FROM movies m
-JOIN source_ratings sr ON m.id = sr.movie_id
-JOIN sources s ON sr.source_id = s.id
-WHERE m.id = 'movie-uuid-here'
-ORDER BY s.name;
-```
-
-### Get top-rated movies by blend score
-```sql
-SELECT 
-    m.title,
-    m.release_year,
-    bs.score,
-    bs.source_count,
-    bs.votes_weighted
-FROM movies m
-JOIN blend_scores bs ON m.id = bs.movie_id
-WHERE bs.expires_at > NOW()
-ORDER BY bs.score DESC
-LIMIT 10;
-```
-
-### Get user's recent watch history
-```sql
-SELECT 
-    m.title,
-    m.poster_url,
-    wh.watched_at,
-    wh.context->>'platform' as platform
-FROM watch_history wh
-JOIN movies m ON wh.movie_id = m.id
-WHERE wh.user_id = auth.uid()
-ORDER BY wh.watched_at DESC
-LIMIT 20;
-```
-
-### Get user's rated movies with their ratings
-```sql
-SELECT 
-    m.title,
-    ur.rating,
-    ur.review,
-    ur.rated_at
-FROM user_ratings ur
-JOIN movies m ON ur.movie_id = m.id
-WHERE ur.user_id = auth.uid()
-ORDER BY ur.rated_at DESC;
-```
-
----
-
-## Setup Instructions
-
-### 1. Run the Schema
-Copy the entire schema SQL and run it in the Supabase SQL Editor.
-
-### 2. Load Sample Data
-Use the provided sample data SQL to populate the database with test movies, sources, and ratings.
-
 ### 3. Create Test Users
 - Go to Authentication → Users in Supabase Dashboard
 - Add users manually or use the auth API
 - Profiles will be created automatically via the auth trigger
 
 ### 4. Test RLS Policies
-- Log in as different users
-- Verify users can only see/modify their own data
-- Confirm public data is accessible to all
+- Created one script that tests reading and inserting to different tables
+- To test it, see backend/test_connections.py
 
 ---
 
