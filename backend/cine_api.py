@@ -2,11 +2,12 @@ from fastapi import FastAPI, HTTPException
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
+import uuid
 
 load_dotenv()
 
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
@@ -14,7 +15,7 @@ app = FastAPI(title = "CineSync API")
 
 @app.get("/")
 def root():
-    return {"status": "faggot"}
+    return {"status": "ok"}
 
 #POST /movies endpoint accepts limited parameters, ingestion pipeline will fill other parameters
 @app.post("/movies")
@@ -24,7 +25,7 @@ def add_movie(title: str, release_year: int, runtime_minutes: int, content_ratin
         .eq("runtime_minutes", runtime_minutes)\
         .eq("release_year", release_year)\
         .execute()
-    if existing_movies.data and len(existing_movies.data) > 0:
+    if existing_movies.data and len(existing_movies.data) > 0: # type: ignore
         raise HTTPException(status_code=400, detail="Movie already exists in DB.")
     try:
         result = supabase.table("movies").insert({
@@ -34,7 +35,17 @@ def add_movie(title: str, release_year: int, runtime_minutes: int, content_ratin
             "content_rating": content_rating,
             "poster_url": poster_url
         }).execute()
-        return result.data[0]
+        return result.data[0] # type: ignore
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
+@app.post("/watch_history")
+def add_watched_movie(user_id: str, movie_id: str):
+    try:
+        result = supabase.table("watch_history").insert({
+            "user_id": user_id,
+            "movie_id": movie_id
+        }).execute() # type: ignore
+        return result.data[0] # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
