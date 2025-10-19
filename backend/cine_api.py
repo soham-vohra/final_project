@@ -17,6 +17,14 @@ app = FastAPI(title = "CineSync API")
 def root():
     return {"status": "ok"}
 
+@app.get("/movies")
+def get_movies():
+    try:
+        result = supabase.table("movies").select("*").execute()
+        return result.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # POST /movies endpoint accepts limited parameters, ingestion pipeline will fill other parameters
 @app.post("/movies")
 def add_movie(title: str, release_year: int, runtime_minutes: int, content_rating: str, poster_url: str):
