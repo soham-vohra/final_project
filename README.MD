@@ -290,4 +290,8 @@ Endpoint 4: Get counted number of rewatches in watch_history table
 Endpoint 5: Post for user to input their rating of the movie
   - Allows user to input their perceived score/rating of a movie
 
-
+## Supabase API Understanding
+Supabase API allows simple get and post methods to each table. 
+Users are able to access records by querying by any table parameter/column.
+Users are able to post to tables with requests containing complete formatted data.
+This is inadequate for implementing business logic/math because there is no additional functionality provided.
