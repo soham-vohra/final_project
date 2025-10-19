@@ -76,3 +76,23 @@ def count_user_rewatches(user_id: str, movie_id: str):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.post("/user_rating")
+def user_movie_rating(user_id: str, movie_id: str, rating: int, review: str):
+    existing_rating = supabase.table("user_ratings").select("id, user_id, movie_id")\
+        .eq("user_id", user_id)\
+        .eq("movie_id", movie_id)\
+        .execute()
+    if existing_rating.data and len(existing_rating.data) > 0:
+        raise HTTPException(status_code=400, detail="User has already rated this movie")
+    try:
+        res = supabase.table("user_ratings").insert({
+            "user_id": user_id,
+            "movie_id": movie_id,
+            "rating": rating,
+            "review": review
+        }).execute()
+        return res.data[0] #type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
