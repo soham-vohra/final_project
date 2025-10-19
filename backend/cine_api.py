@@ -17,7 +17,7 @@ app = FastAPI(title = "CineSync API")
 def root():
     return {"status": "ok"}
 
-#POST /movies endpoint accepts limited parameters, ingestion pipeline will fill other parameters
+# POST /movies endpoint accepts limited parameters, ingestion pipeline will fill other parameters
 @app.post("/movies")
 def add_movie(title: str, release_year: int, runtime_minutes: int, content_rating: str, poster_url: str):
     existing_movies = supabase.table("movies").select("id, title, release_year, runtime_minutes")\
@@ -38,7 +38,9 @@ def add_movie(title: str, release_year: int, runtime_minutes: int, content_ratin
         return result.data[0] # type: ignore
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
+# POST /watch_history endpoint adds new movie to user's watch history
+# Allows duplicates to track rewatches
 @app.post("/watch_history")
 def add_watched_movie(user_id: str, movie_id: str):
     try:
@@ -47,5 +49,22 @@ def add_watched_movie(user_id: str, movie_id: str):
             "movie_id": movie_id
         }).execute() # type: ignore
         return result.data[0] # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# GET /watch_history/count_rewatches returns count, user id, and movie id of rewatches   
+@app.get("/watch_history/count_rewatches")
+def count_user_rewatches(user_id: str, movie_id: str):
+    try:
+        result = supabase.table("watch_history").select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .eq("movie_id", movie_id)\
+            .execute()
+        return {
+            "count": result.count or 0, 
+            "user_id": user_id,
+            "movie_id": movie_id,
+        }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
