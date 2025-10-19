@@ -4,6 +4,10 @@
 
 This is a comprehensive movie rating and tracking database built for Supabase. It aggregates ratings from multiple sources (IMDb, Rotten Tomatoes, etc.), allows users to rate movies, track watch history, and create custom lists.
 
+## Entity Relationship Diagram
+
+![ERD Photo](/assets/PNG%20image.png)
+
 ## Database Schema
 
 ### Tables
