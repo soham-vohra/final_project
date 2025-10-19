@@ -252,3 +252,42 @@ auth.users
 - The schema uses `auth.users` from Supabase's built-in authentication
 - RLS policies use `auth.uid()` to identify the current user
 - Movie updates automatically trigger timestamp updates via database triggers
+
+**********************************************************************************************************************************
+WEEK 6 Documentation
+
+# CineSync API
+
+## What it Does
+Our API interacts with supabase tables to implement business logic and allows users to update tables where RLS applies. This is done with FastAPI and adds business rules beyond database constraints, combines multiple supbase calls, and creates developer friendly endpoints.
+
+## Setup
+1. `pip install -r requirements.txt`
+2. Add `.env` with Supabase credentials
+3. `uvicorn main:app --reload`
+4. Test at http://127.0.0.1:8000/docs
+
+## Endpoints (at a minimum)
+- `GET /movies` - List all movies
+- `POST /movies` - Post new movie 
+- `POST /watch_history` - Allows user to add new movie to their watch_history
+- `GET /watch_history/count_rewatches` - Retrieves number of times user has watched specified movie
+- `POST /user_ratings` - Post for user to input their rating of specified movie
+
+## Key Business Rule
+Endpoint 1: Get all movies from movies table
+  - Simple get to display all movies in the movies table
+
+Endpoint 2: Post to add movie to movies table
+  - Accepts title (string), release_year (int), runtime_minutes (int), content_rating (string), poster_url (string)  as parameters
+
+Endpoint 3: Post to add watched movie by user to watch_history table
+  - User inputs a new movie that they watched which will then update the watch_history table for them
+
+Endpoint 4: Get counted number of rewatches in watch_history table
+  - Displays number of times a movie has been watched
+
+Endpoint 5: Post for user to input their rating of the movie
+  - Allows user to input their perceived score/rating of a movie
+
+
