@@ -295,7 +295,33 @@ Endpoint 5: Post for user to input their rating of the movie
   - Allows user to input their perceived score/rating of a movie
 
 ## Supabase API Understanding
+
 Supabase API allows simple get and post methods to each table. 
 Users are able to access records by querying by any table parameter/column.
 Users are able to post to tables with requests containing complete formatted data.
 This is inadequate for implementing business logic/math because there is no additional functionality provided.
+
+---
+
+## Frontend Setup
+
+To run the CineSync React Native frontend:
+
+1. Navigate to the frontend directory:
+   ```bash
+   cd playlist_frontend
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Make sure you have **Xcode** and **Expo** properly installed and configured on your machine.
+
+4. Run the iOS simulator:
+   ```bash
+   npm run ios
+   ```
+
+This will start the CineSync app locally in your iOS simulator with full mock data functionality and UI.
