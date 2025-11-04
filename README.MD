@@ -321,6 +321,14 @@ To run the CineSync React Native frontend:
 
 4. Run the iOS simulator:
    ```bash
+   npm run ios
+   ```
+
+This will start the CineSync app locally in your iOS simulator with full mock data functionality and UI.
+
+---
+
+## Contributions and distribution of work
 
 Soham: Created movie gallery and frontend base
 
@@ -329,8 +337,3 @@ Bryan: Created the search function for movies in the gallery
 Ilias: Implemented sort function by movie release date
 
 Jaime: Added the function for users to add a new movie to their gallery 
-
-   npm run ios
-   ```
-
-This will start the CineSync app locally in your iOS simulator with full mock data functionality and UI.
