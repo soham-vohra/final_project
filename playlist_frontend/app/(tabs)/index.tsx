@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View, TextInput } from 'react-native';
+import { ScrollView, StyleSheet, View, TextInput, Pressable } from 'react-native';
 import { Image } from 'expo-image';
 
 import { ThemedText } from '@/components/themed-text';
@@ -10,14 +10,27 @@ import { mockMovies } from '../mockData';
 
 export default function HomeScreen() {
   const [search, setSearch] = useState('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  const filteredMovies = useMemo(
-    () =>
-      mockMovies.filter((movie) =>
-        movie.title.toLowerCase().includes(search.trim().toLowerCase())
-      ),
-    [search]
-  );
+  const filteredMovies = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    const filtered = mockMovies.filter((movie) =>
+      movie.title.toLowerCase().includes(query)
+    );
+
+    return filtered
+      .slice()
+      .sort((a, b) => {
+        const yearA = a.release_year ?? 0;
+        const yearB = b.release_year ?? 0;
+        return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
+      });
+  }, [search, sortOrder]);
+
+  const toggleSortOrder = () => {
+    setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+  };
 
   return (
     <ThemedView style={styles.screen}>
@@ -31,7 +44,7 @@ export default function HomeScreen() {
         </ThemedText>
       </View>
 
-      {/* Search bar */}
+      {/* Search bar + sort toggle */}
       <View style={styles.searchContainer}>
         <TextInput
           value={search}
@@ -42,6 +55,12 @@ export default function HomeScreen() {
           autoCorrect={false}
           autoCapitalize="none"
         />
+
+        <Pressable style={styles.sortToggle} onPress={toggleSortOrder}>
+          <ThemedText type="defaultSemiBold" style={styles.sortToggleLabel}>
+            {sortOrder === 'asc' ? 'Year ↑' : 'Year ↓'}
+          </ThemedText>
+        </Pressable>
       </View>
 
       {/* 2-column movie grid */}
@@ -125,9 +144,11 @@ const styles = StyleSheet.create({
   searchContainer: {
     paddingHorizontal: 20,
     marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   searchInput: {
-    width: '100%',
+    flex: 1,
     borderRadius: 999,
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -136,6 +157,21 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 160, 255, 0.7)',
     color: '#FFFFFF',
     fontSize: 13,
+    marginRight: 10,
+  },
+  sortToggle: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(45, 14, 80, 0.95)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sortToggleLabel: {
+    fontSize: 11,
+    color: '#FDF7FF',
   },
   list: {
     flex: 1,
