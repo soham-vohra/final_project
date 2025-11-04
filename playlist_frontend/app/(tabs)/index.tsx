@@ -1,32 +1,85 @@
 import React, { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, View, TextInput, Pressable } from 'react-native';
+import {
+  ScrollView,
+  StyleSheet,
+  View,
+  TextInput,
+  Pressable,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
+  Alert,
+} from 'react-native';
 import { Image } from 'expo-image';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-
-// From app/(tabs)/index.tsx, ../../mockData points at the project-level mockData.js.
 import { mockMovies } from '../mockData';
 
 export default function HomeScreen() {
+  const [movies, setMovies] = useState(() => [...mockMovies]);
   const [search, setSearch] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  const [isAddModalVisible, setAddModalVisible] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newYear, setNewYear] = useState('');
+  const [newRuntime, setNewRuntime] = useState('');
+  const [newRating, setNewRating] = useState('');
+  const [newPosterUrl, setNewPosterUrl] = useState('');
 
   const filteredMovies = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    const filtered = mockMovies.filter((movie) =>
+    const filtered = movies.filter((movie) =>
       movie.title.toLowerCase().includes(query)
     );
 
-    return filtered
-      .slice()
-      .sort((a, b) => {
-        const yearA = a.release_year ?? 0;
-        const yearB = b.release_year ?? 0;
-        return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
-      });
-  }, [search, sortOrder]);
+    return filtered.slice().sort((a, b) => {
+      const yearA = a.release_year ?? 0;
+      const yearB = b.release_year ?? 0;
+      return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
+    });
+  }, [search, sortOrder, movies]);
+
+  const handleAddMovie = () => {
+    const title = newTitle.trim();
+    const posterUrl = newPosterUrl.trim();
+
+    if (!title || !posterUrl) {
+      Alert.alert(
+        'Missing information',
+        'Please enter at least a title and poster URL.'
+      );
+      return;
+    }
+
+    const yearNum = newYear ? parseInt(newYear, 10) : undefined;
+    const runtimeNum = newRuntime ? parseInt(newRuntime, 10) : undefined;
+    const nowIso = new Date().toISOString();
+
+    const newMovie = {
+      idx: movies.length,
+      id: `local-${Date.now()}`,
+      title,
+      release_year: Number.isNaN(yearNum) ? undefined : yearNum,
+      runtime_minutes: Number.isNaN(runtimeNum) ? undefined : runtimeNum,
+      content_rating: newRating.trim() || 'NR',
+      poster_url: posterUrl,
+      synopsis: null,
+      external_ids: {},
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    setMovies((prev: any[]) => [newMovie, ...prev]);
+    setNewTitle('');
+    setNewYear('');
+    setNewRuntime('');
+    setNewRating('');
+    setNewPosterUrl('');
+    setAddModalVisible(false);
+  };
 
   const toggleSortOrder = () => {
     setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
@@ -44,7 +97,7 @@ export default function HomeScreen() {
         </ThemedText>
       </View>
 
-      {/* Search bar + sort toggle */}
+      {/* Search + Sort */}
       <View style={styles.searchContainer}>
         <TextInput
           value={search}
@@ -55,7 +108,6 @@ export default function HomeScreen() {
           autoCorrect={false}
           autoCapitalize="none"
         />
-
         <Pressable style={styles.sortToggle} onPress={toggleSortOrder}>
           <ThemedText type="defaultSemiBold" style={styles.sortToggleLabel}>
             {sortOrder === 'asc' ? 'Year ↑' : 'Year ↓'}
@@ -63,7 +115,7 @@ export default function HomeScreen() {
         </Pressable>
       </View>
 
-      {/* 2-column movie grid */}
+      {/* Movie Grid */}
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContent}
@@ -114,9 +166,131 @@ export default function HomeScreen() {
           ))}
         </View>
       </ScrollView>
+
+      {/* Add Movie Button */}
+      <View style={styles.addButtonContainer}>
+        <Pressable
+          style={styles.addButton}
+          onPress={() => setAddModalVisible(true)}
+        >
+          <ThemedText type="defaultSemiBold" style={styles.addButtonLabel}>
+            + Add Movie
+          </ThemedText>
+        </Pressable>
+      </View>
+
+      {/* Add Movie Modal */}
+      <Modal
+        visible={isAddModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setAddModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
+          <View style={styles.modalContent}>
+            <ThemedText type="title" style={styles.modalTitle}>
+              Add Movie
+            </ThemedText>
+
+            <ScrollView
+              style={styles.modalForm}
+              contentContainerStyle={styles.modalFormContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <FormField
+                label="Title"
+                value={newTitle}
+                onChangeText={setNewTitle}
+                placeholder="Nice Guys"
+              />
+              <FormField
+                label="Release Year"
+                value={newYear}
+                onChangeText={setNewYear}
+                placeholder="2016"
+                keyboardType="numeric"
+              />
+              <FormField
+                label="Runtime (minutes)"
+                value={newRuntime}
+                onChangeText={setNewRuntime}
+                placeholder="116"
+                keyboardType="numeric"
+              />
+              <FormField
+                label="Content Rating"
+                value={newRating}
+                onChangeText={setNewRating}
+                placeholder="R, PG-13, etc."
+              />
+              <FormField
+                label="Poster URL"
+                value={newPosterUrl}
+                onChangeText={setNewPosterUrl}
+                placeholder="https://image.tmdb.org/t/p/original/..."
+                autoCapitalize="none"
+              />
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <Pressable
+                style={[styles.modalButton, styles.modalButtonSecondary]}
+                onPress={() => setAddModalVisible(false)}
+              >
+                <ThemedText
+                  type="defaultSemiBold"
+                  style={styles.modalButtonText}
+                >
+                  Cancel
+                </ThemedText>
+              </Pressable>
+
+              <Pressable
+                style={[styles.modalButton, styles.modalButtonPrimary]}
+                onPress={handleAddMovie}
+              >
+                <ThemedText
+                  type="defaultSemiBold"
+                  style={styles.modalButtonText}
+                >
+                  Save
+                </ThemedText>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </ThemedView>
   );
 }
+
+// Small reusable component for inputs
+const FormField = ({
+  label,
+  value,
+  onChangeText,
+  placeholder,
+  keyboardType,
+  autoCapitalize,
+}: any) => (
+  <>
+    <ThemedText type="default" style={styles.modalLabel}>
+      {label}
+    </ThemedText>
+    <TextInput
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      keyboardType={keyboardType}
+      placeholderTextColor="rgba(228, 206, 255, 0.6)"
+      style={styles.modalInput}
+      autoCapitalize={autoCapitalize}
+    />
+  </>
+);
 
 const styles = StyleSheet.create({
   screen: {
@@ -202,7 +376,7 @@ const styles = StyleSheet.create({
   },
   posterWrapper: {
     width: '100%',
-    aspectRatio: 1 / 1.05, // slightly shorter than full poster to give text room
+    aspectRatio: 1 / 1.05,
     overflow: 'hidden',
   },
   poster: {
@@ -247,6 +421,101 @@ const styles = StyleSheet.create({
   runtime: {
     fontSize: 11,
     color: '#F8F5FF',
+  },
+  addButtonContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 20,
+    alignItems: 'center',
+  },
+  addButton: {
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(126, 52, 255, 1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  addButtonLabel: {
+    fontSize: 13,
+    color: '#FFFFFF',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+  },
+  modalContent: {
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 24,
+    backgroundColor: '#0B0218',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.5)',
+    paddingTop: 18,
+    paddingBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 18 },
+    shadowOpacity: 0.6,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    color: '#FFFFFF',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  modalForm: {
+    maxHeight: 260,
+  },
+  modalFormContent: {
+    paddingHorizontal: 18,
+    paddingBottom: 8,
+  },
+  modalLabel: {
+    fontSize: 12,
+    color: 'rgba(228, 206, 255, 0.9)',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  modalInput: {
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(24, 9, 44, 0.95)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.7)',
+    color: '#FFFFFF',
+    fontSize: 13,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    gap: 8,
+  },
+  modalButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
+  modalButtonPrimary: {
+    backgroundColor: 'rgba(126, 52, 255, 1)',
+  },
+  modalButtonSecondary: {
+    backgroundColor: 'rgba(34, 16, 60, 0.95)',
+  },
+  modalButtonText: {
+    fontSize: 12,
+    color: '#FFFFFF',
   },
 });
 
