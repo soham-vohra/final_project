@@ -16,18 +16,29 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { mockMovies } from '../mockData';
 
+// Local type for user ratings (purely frontend for now)
+type UserRating = {
+  movieId: string;
+  rating: number;
+  review?: string;
+};
+
 export default function HomeScreen() {
   const [movies, setMovies] = useState(() => [...mockMovies]);
   const [search, setSearch] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  const [isAddModalVisible, setAddModalVisible] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const [newYear, setNewYear] = useState('');
-  const [newRuntime, setNewRuntime] = useState('');
-  const [newRating, setNewRating] = useState('');
-  const [newPosterUrl, setNewPosterUrl] = useState('');
+  // --- New: local ratings state ---------------------------------------------
+  const [userRatings, setUserRatings] = useState<UserRating[]>([]);
 
+  // --- New: Rank Movie modal state ------------------------------------------
+  const [isRankModalVisible, setRankModalVisible] = useState(false);
+  const [rankSearch, setRankSearch] = useState('');
+  const [selectedMovieId, setSelectedMovieId] = useState<string | null>(null);
+  const [selectedRating, setSelectedRating] = useState<number>(0);
+  const [reviewText, setReviewText] = useState('');
+
+  // Filter movies for the main gallery
   const filteredMovies = useMemo(() => {
     const query = search.trim().toLowerCase();
 
@@ -42,47 +53,82 @@ export default function HomeScreen() {
     });
   }, [search, sortOrder, movies]);
 
-  const handleAddMovie = () => {
-    const title = newTitle.trim();
-    const posterUrl = newPosterUrl.trim();
+  // Filter movies inside the Rank modal search
+  const rankSearchResults = useMemo(() => {
+    const query = rankSearch.trim().toLowerCase();
+    if (!query) return movies.slice(0, 10); // show a few by default
 
-    if (!title || !posterUrl) {
-      Alert.alert(
-        'Missing information',
-        'Please enter at least a title and poster URL.'
-      );
-      return;
-    }
-
-    const yearNum = newYear ? parseInt(newYear, 10) : undefined;
-    const runtimeNum = newRuntime ? parseInt(newRuntime, 10) : undefined;
-    const nowIso = new Date().toISOString();
-
-    const newMovie = {
-      idx: movies.length,
-      id: `local-${Date.now()}`,
-      title,
-      release_year: Number.isNaN(yearNum) ? undefined : yearNum,
-      runtime_minutes: Number.isNaN(runtimeNum) ? undefined : runtimeNum,
-      content_rating: newRating.trim() || 'NR',
-      poster_url: posterUrl,
-      synopsis: null,
-      external_ids: {},
-      created_at: nowIso,
-      updated_at: nowIso,
-    };
-
-    setMovies((prev: any[]) => [newMovie, ...prev]);
-    setNewTitle('');
-    setNewYear('');
-    setNewRuntime('');
-    setNewRating('');
-    setNewPosterUrl('');
-    setAddModalVisible(false);
-  };
+    return movies.filter((movie) =>
+      movie.title.toLowerCase().includes(query)
+    );
+  }, [rankSearch, movies]);
 
   const toggleSortOrder = () => {
     setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+  };
+
+  // Helper to find a rating for a movie
+  const getRatingForMovie = (movieId: string): UserRating | undefined =>
+    userRatings.find((r) => r.movieId === movieId);
+
+  // Open Rank modal with optional pre-selected movie
+  const openRankModal = (movieId?: string) => {
+    setRankModalVisible(true);
+
+    if (movieId) {
+      const existing = getRatingForMovie(movieId);
+      setSelectedMovieId(movieId);
+      setSelectedRating(existing?.rating ?? 0);
+      setReviewText(existing?.review ?? '');
+      const movie = movies.find((m) => m.id === movieId);
+      setRankSearch(movie?.title ?? '');
+    } else {
+      // fresh state
+      setSelectedMovieId(null);
+      setSelectedRating(0);
+      setReviewText('');
+      setRankSearch('');
+    }
+  };
+
+  const closeRankModal = () => {
+    setRankModalVisible(false);
+  };
+
+  // Save rating locally (no backend yet)
+  const handleSaveRating = () => {
+    if (!selectedMovieId) {
+      Alert.alert('Pick a movie', 'Please select a movie to rank.');
+      return;
+    }
+    if (!selectedRating || selectedRating < 1) {
+      Alert.alert('Pick a rating', 'Please choose a rating from 1–5 stars.');
+      return;
+    }
+
+    setUserRatings((prev) => {
+      const existingIndex = prev.findIndex(
+        (r) => r.movieId === selectedMovieId
+      );
+      const updated: UserRating = {
+        movieId: selectedMovieId,
+        rating: selectedRating,
+        review: reviewText.trim() || undefined,
+      };
+
+      if (existingIndex === -1) {
+        return [updated, ...prev];
+      }
+
+      const clone = [...prev];
+      clone[existingIndex] = updated;
+      return clone;
+    });
+
+    // TODO (future): call backend API to persist rating:
+    // await fetch('/api/ratings', { method: 'POST', body: JSON.stringify({...}) });
+
+    closeRankModal();
   };
 
   return (
@@ -122,69 +168,90 @@ export default function HomeScreen() {
         style={styles.list}
       >
         <View style={styles.grid}>
-          {filteredMovies.map((movie) => (
-            <View key={movie.id} style={styles.card}>
-              <View style={styles.posterWrapper}>
-                <Image
-                  source={{ uri: movie.poster_url }}
-                  style={styles.poster}
-                  contentFit="cover"
-                />
-              </View>
+          {filteredMovies.map((movie) => {
+            const userRating = getRatingForMovie(movie.id);
 
-              <View style={styles.cardBody}>
-                <ThemedText
-                  numberOfLines={1}
-                  type="defaultSemiBold"
-                  style={styles.cardTitle}
-                >
-                  {movie.title}
-                </ThemedText>
+            return (
+              <Pressable
+                key={movie.id}
+                style={styles.card}
+                onPress={() => openRankModal(movie.id)}
+              >
+                <View style={styles.posterWrapper}>
+                  <Image
+                    source={{ uri: movie.poster_url }}
+                    style={styles.poster}
+                    contentFit="cover"
+                  />
+                </View>
 
-                <ThemedText type="default" style={styles.cardYear}>
-                  {movie.release_year}
-                </ThemedText>
+                <View style={styles.cardBody}>
+                  <ThemedText
+                    numberOfLines={1}
+                    type="defaultSemiBold"
+                    style={styles.cardTitle}
+                  >
+                    {movie.title}
+                  </ThemedText>
 
-                <View style={styles.cardMetaRow}>
-                  <View style={styles.badge}>
-                    <ThemedText
-                      type="defaultSemiBold"
-                      style={styles.badgeText}
-                    >
-                      {movie.content_rating ?? 'NR'}
+                  <ThemedText type="default" style={styles.cardYear}>
+                    {movie.release_year}
+                  </ThemedText>
+
+                  <View style={styles.cardMetaRow}>
+                    <View style={styles.badge}>
+                      <ThemedText
+                        type="defaultSemiBold"
+                        style={styles.badgeText}
+                      >
+                        {movie.content_rating ?? 'NR'}
+                      </ThemedText>
+                    </View>
+
+                    <ThemedText type="default" style={styles.runtime}>
+                      {movie.runtime_minutes
+                        ? `${movie.runtime_minutes} min`
+                        : '—'}
                     </ThemedText>
                   </View>
 
-                  <ThemedText type="default" style={styles.runtime}>
-                    {movie.runtime_minutes
-                      ? `${movie.runtime_minutes} min`
-                      : '—'}
-                  </ThemedText>
+                  {/* New: show user rating if it exists */}
+                  {userRating && (
+                    <View style={styles.ratingRow}>
+                      <ThemedText
+                        type="defaultSemiBold"
+                        style={styles.ratingStar}
+                      >
+                        ★
+                      </ThemedText>
+                      <ThemedText type="default" style={styles.ratingText}>
+                        {userRating.rating}
+                        {userRating.review ? ' · Tap to edit rating' : ''}
+                      </ThemedText>
+                    </View>
+                  )}
                 </View>
-              </View>
-            </View>
-          ))}
+              </Pressable>
+            );
+          })}
         </View>
       </ScrollView>
 
-      {/* Add Movie Button */}
+      {/* Rank Movie Button */}
       <View style={styles.addButtonContainer}>
-        <Pressable
-          style={styles.addButton}
-          onPress={() => setAddModalVisible(true)}
-        >
+        <Pressable style={styles.addButton} onPress={() => openRankModal()}>
           <ThemedText type="defaultSemiBold" style={styles.addButtonLabel}>
-            + Add Movie
+            ★ Rank Movie
           </ThemedText>
         </Pressable>
       </View>
 
-      {/* Add Movie Modal */}
+      {/* Rank Movie Modal */}
       <Modal
-        visible={isAddModalVisible}
+        visible={isRankModalVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setAddModalVisible(false)}
+        onRequestClose={closeRankModal}
       >
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -192,7 +259,7 @@ export default function HomeScreen() {
         >
           <View style={styles.modalContent}>
             <ThemedText type="title" style={styles.modalTitle}>
-              Add Movie
+              Rank a Movie
             </ThemedText>
 
             <ScrollView
@@ -200,45 +267,114 @@ export default function HomeScreen() {
               contentContainerStyle={styles.modalFormContent}
               keyboardShouldPersistTaps="handled"
             >
-              <FormField
-                label="Title"
-                value={newTitle}
-                onChangeText={setNewTitle}
-                placeholder="Nice Guys"
-              />
-              <FormField
-                label="Release Year"
-                value={newYear}
-                onChangeText={setNewYear}
-                placeholder="2016"
-                keyboardType="numeric"
-              />
-              <FormField
-                label="Runtime (minutes)"
-                value={newRuntime}
-                onChangeText={setNewRuntime}
-                placeholder="116"
-                keyboardType="numeric"
-              />
-              <FormField
-                label="Content Rating"
-                value={newRating}
-                onChangeText={setNewRating}
-                placeholder="R, PG-13, etc."
-              />
-              <FormField
-                label="Poster URL"
-                value={newPosterUrl}
-                onChangeText={setNewPosterUrl}
-                placeholder="https://image.tmdb.org/t/p/original/..."
+              {/* 1. Search for a movie */}
+              <ThemedText type="default" style={styles.modalLabel}>
+                1. Search for a movie
+              </ThemedText>
+              <TextInput
+                value={rankSearch}
+                onChangeText={setRankSearch}
+                placeholder="Start typing a title..."
+                placeholderTextColor="rgba(228, 206, 255, 0.6)"
+                style={styles.modalInput}
+                autoCorrect={false}
                 autoCapitalize="none"
+              />
+
+              <ScrollView
+                style={styles.searchResultsList}
+                nestedScrollEnabled
+              >
+                {rankSearchResults.map((movie) => {
+                  const isSelected = movie.id === selectedMovieId;
+                  return (
+                    <Pressable
+                      key={movie.id}
+                      style={[
+                        styles.searchResultItem,
+                        isSelected && styles.searchResultItemSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedMovieId(movie.id);
+                        // prefill search input with exact title
+                        setRankSearch(movie.title);
+                        const existing = getRatingForMovie(movie.id);
+                        setSelectedRating(existing?.rating ?? 0);
+                        setReviewText(existing?.review ?? '');
+                      }}
+                    >
+                      <Image
+                        source={{ uri: movie.poster_url }}
+                        style={styles.searchResultPoster}
+                        contentFit="cover"
+                      />
+                      <View style={styles.searchResultTextContainer}>
+                        <ThemedText
+                          type="defaultSemiBold"
+                          style={styles.searchResultTitle}
+                          numberOfLines={1}
+                        >
+                          {movie.title}
+                        </ThemedText>
+                        <ThemedText
+                          type="default"
+                          style={styles.searchResultSubtitle}
+                        >
+                          {movie.release_year} · {movie.content_rating ?? 'NR'}
+                        </ThemedText>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {/* 2. Rating */}
+              <ThemedText type="default" style={styles.modalLabel}>
+                2. Choose your rating
+              </ThemedText>
+              <View style={styles.starsRow}>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <Pressable
+                    key={star}
+                    style={styles.starButton}
+                    onPress={() => setSelectedRating(star)}
+                  >
+                    <ThemedText
+                      type="defaultSemiBold"
+                      style={[
+                        styles.starText,
+                        selectedRating >= star && styles.starTextActive,
+                      ]}
+                    >
+                      {selectedRating >= star ? '★' : '☆'}
+                    </ThemedText>
+                  </Pressable>
+                ))}
+                {selectedRating > 0 && (
+                  <ThemedText type="default" style={styles.starValueText}>
+                    {selectedRating}/5
+                  </ThemedText>
+                )}
+              </View>
+
+              {/* 3. Optional review */}
+              <ThemedText type="default" style={styles.modalLabel}>
+                3. Optional review
+              </ThemedText>
+              <TextInput
+                value={reviewText}
+                onChangeText={setReviewText}
+                placeholder="What did you think? (optional)"
+                placeholderTextColor="rgba(228, 206, 255, 0.6)"
+                style={[styles.modalInput, styles.reviewInput]}
+                multiline
               />
             </ScrollView>
 
             <View style={styles.modalActions}>
               <Pressable
                 style={[styles.modalButton, styles.modalButtonSecondary]}
-                onPress={() => setAddModalVisible(false)}
+                onPress={closeRankModal}
               >
                 <ThemedText
                   type="defaultSemiBold"
@@ -250,13 +386,13 @@ export default function HomeScreen() {
 
               <Pressable
                 style={[styles.modalButton, styles.modalButtonPrimary]}
-                onPress={handleAddMovie}
+                onPress={handleSaveRating}
               >
                 <ThemedText
                   type="defaultSemiBold"
                   style={styles.modalButtonText}
                 >
-                  Save
+                  Save Rating
                 </ThemedText>
               </Pressable>
             </View>
@@ -266,31 +402,6 @@ export default function HomeScreen() {
     </ThemedView>
   );
 }
-
-// Small reusable component for inputs
-const FormField = ({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-  keyboardType,
-  autoCapitalize,
-}: any) => (
-  <>
-    <ThemedText type="default" style={styles.modalLabel}>
-      {label}
-    </ThemedText>
-    <TextInput
-      value={value}
-      onChangeText={onChangeText}
-      placeholder={placeholder}
-      keyboardType={keyboardType}
-      placeholderTextColor="rgba(228, 206, 255, 0.6)"
-      style={styles.modalInput}
-      autoCapitalize={autoCapitalize}
-    />
-  </>
-);
 
 const styles = StyleSheet.create({
   screen: {
@@ -422,12 +533,27 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#F8F5FF',
   },
+  ratingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  ratingStar: {
+    fontSize: 13,
+    color: '#FFD86B',
+    marginRight: 4,
+  },
+  ratingText: {
+    fontSize: 11,
+    color: '#F8F5FF',
+  },
   addButtonContainer: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 20,
     alignItems: 'center',
+    pointerEvents: 'box-none',
   },
   addButton: {
     paddingHorizontal: 24,
@@ -473,7 +599,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   modalForm: {
-    maxHeight: 260,
+    maxHeight: 360,
   },
   modalFormContent: {
     paddingHorizontal: 18,
@@ -482,7 +608,7 @@ const styles = StyleSheet.create({
   modalLabel: {
     fontSize: 12,
     color: 'rgba(228, 206, 255, 0.9)',
-    marginTop: 8,
+    marginTop: 10,
     marginBottom: 4,
   },
   modalInput: {
@@ -494,6 +620,66 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 160, 255, 0.7)',
     color: '#FFFFFF',
     fontSize: 13,
+  },
+  reviewInput: {
+    minHeight: 70,
+    textAlignVertical: 'top',
+  },
+  searchResultsList: {
+    maxHeight: 160,
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  searchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  searchResultItemSelected: {
+    backgroundColor: 'rgba(126, 52, 255, 0.25)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.8)',
+  },
+  searchResultPoster: {
+    width: 32,
+    height: 48,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  searchResultTextContainer: {
+    flex: 1,
+  },
+  searchResultTitle: {
+    fontSize: 13,
+    color: '#FFFFFF',
+  },
+  searchResultSubtitle: {
+    fontSize: 11,
+    color: 'rgba(228, 206, 255, 0.8)',
+  },
+  starsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  starButton: {
+    marginRight: 4,
+  },
+  starText: {
+    fontSize: 22,
+    color: 'rgba(228, 206, 255, 0.7)',
+  },
+  starTextActive: {
+    color: '#FFD86B',
+  },
+  starValueText: {
+    marginLeft: 8,
+    fontSize: 12,
+    color: '#F8F5FF',
   },
   modalActions: {
     flexDirection: 'row',
