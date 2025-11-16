@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ScrollView,
+  FlatList,
   StyleSheet,
   View,
   TextInput,
@@ -9,17 +10,26 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { mockMovies } from '../mockData';
+
+const API_BASE_URL = 'http://localhost:8000'; // update if your backend runs elsewhere
 
 export default function HomeScreen() {
-  const [movies, setMovies] = useState(() => [...mockMovies]);
+  const [movies, setMovies] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const [isAddModalVisible, setAddModalVisible] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -29,18 +39,80 @@ export default function HomeScreen() {
   const [newPosterUrl, setNewPosterUrl] = useState('');
 
   const filteredMovies = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    return movies
+      .slice()
+      .sort((a, b) => {
+        const yearA = a.release_year ?? 0;
+        const yearB = b.release_year ?? 0;
+        return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
+      });
+  }, [sortOrder, movies]);
 
-    const filtered = movies.filter((movie) =>
-      movie.title.toLowerCase().includes(query)
-    );
+  const hasMore = movies.length < total;
 
-    return filtered.slice().sort((a, b) => {
-      const yearA = a.release_year ?? 0;
-      const yearB = b.release_year ?? 0;
-      return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
-    });
-  }, [search, sortOrder, movies]);
+  const fetchMovies = useCallback(
+    async (options?: { page?: number; append?: boolean; currentSearch?: string }) => {
+      const targetPage = options?.page ?? 1;
+      const append = options?.append ?? false;
+      const searchQuery = options?.currentSearch ?? search;
+
+      try {
+        if (append) {
+          setIsLoadingMore(true);
+        } else if (targetPage === 1 && !isRefreshing) {
+          setIsLoading(true);
+        }
+
+        const params = new URLSearchParams();
+        params.append('page', String(targetPage));
+        params.append('page_size', String(pageSize));
+        if (searchQuery.trim().length > 0) {
+          params.append('search', searchQuery.trim());
+        }
+
+        const response = await fetch(`${API_BASE_URL}/movies?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error('Failed to fetch movies');
+        }
+
+        const data = await response.json();
+
+        setTotal(data.total ?? 0);
+        setPage(data.page ?? targetPage);
+
+        setMovies((prev) =>
+          append ? [...prev, ...(data.movies ?? [])] : data.movies ?? []
+        );
+      } catch (error) {
+        console.error(error);
+        Alert.alert('Error', 'Failed to load movies. Please try again.');
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+        setIsLoadingMore(false);
+      }
+    },
+    [pageSize, search, isRefreshing]
+  );
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      fetchMovies({ page: 1, append: false, currentSearch: search });
+    }, 300);
+
+    return () => clearTimeout(timeout);
+  }, [search, fetchMovies]);
+
+  const handleRefresh = () => {
+    setIsRefreshing(true);
+    fetchMovies({ page: 1, append: false });
+  };
+
+  const handleLoadMore = () => {
+    if (isLoadingMore || isLoading) return;
+    if (!hasMore) return;
+    fetchMovies({ page: page + 1, append: true });
+  };
 
   const handleAddMovie = () => {
     const title = newTitle.trim();
@@ -90,7 +162,7 @@ export default function HomeScreen() {
       {/* Header */}
       <View style={styles.header}>
         <ThemedText type="title" style={styles.title}>
-          Mock Movie Gallery
+          CineSync Movie Gallery
         </ThemedText>
         <ThemedText type="default" style={styles.subtitle}>
           Search our CineSync mock movie catalog by title.
@@ -116,56 +188,81 @@ export default function HomeScreen() {
       </View>
 
       {/* Movie Grid */}
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.listContent}
-        style={styles.list}
-      >
-        <View style={styles.grid}>
-          {filteredMovies.map((movie) => (
-            <View key={movie.id} style={styles.card}>
-              <View style={styles.posterWrapper}>
-                <Image
-                  source={{ uri: movie.poster_url }}
-                  style={styles.poster}
-                  contentFit="cover"
-                />
-              </View>
+      <FlatList
+        data={filteredMovies}
+        keyExtractor={(movie) => movie.id}
+        numColumns={2}
+        renderItem={({ item: movie }) => (
+          <View style={styles.card}>
+            <View style={styles.posterWrapper}>
+              <Image
+                source={{ uri: movie.poster_url }}
+                style={styles.poster}
+                contentFit="cover"
+              />
+            </View>
 
-              <View style={styles.cardBody}>
-                <ThemedText
-                  numberOfLines={1}
-                  type="defaultSemiBold"
-                  style={styles.cardTitle}
-                >
-                  {movie.title}
-                </ThemedText>
+            <View style={styles.cardBody}>
+              <ThemedText
+                numberOfLines={1}
+                type="defaultSemiBold"
+                style={styles.cardTitle}
+              >
+                {movie.title}
+              </ThemedText>
 
-                <ThemedText type="default" style={styles.cardYear}>
-                  {movie.release_year}
-                </ThemedText>
+              <ThemedText type="default" style={styles.cardYear}>
+                {movie.release_year}
+              </ThemedText>
 
-                <View style={styles.cardMetaRow}>
-                  <View style={styles.badge}>
-                    <ThemedText
-                      type="defaultSemiBold"
-                      style={styles.badgeText}
-                    >
-                      {movie.content_rating ?? 'NR'}
-                    </ThemedText>
-                  </View>
-
-                  <ThemedText type="default" style={styles.runtime}>
-                    {movie.runtime_minutes
-                      ? `${movie.runtime_minutes} min`
-                      : '—'}
+              <View style={styles.cardMetaRow}>
+                <View style={styles.badge}>
+                  <ThemedText
+                    type="defaultSemiBold"
+                    style={styles.badgeText}
+                  >
+                    {movie.content_rating ?? 'NR'}
                   </ThemedText>
                 </View>
+
+                <ThemedText type="default" style={styles.runtime}>
+                  {movie.runtime_minutes
+                    ? `${movie.runtime_minutes} min`
+                    : '—'}
+                </ThemedText>
               </View>
             </View>
-          ))}
-        </View>
-      </ScrollView>
+          </View>
+        )}
+        columnWrapperStyle={styles.grid}
+        contentContainerStyle={styles.listContent}
+        style={styles.list}
+        showsVerticalScrollIndicator={false}
+        onEndReached={handleLoadMore}
+        onEndReachedThreshold={0.5}
+        refreshing={isRefreshing}
+        onRefresh={handleRefresh}
+        ListFooterComponent={
+          isLoadingMore ? (
+            <View style={styles.listFooter}>
+              <ActivityIndicator />
+            </View>
+          ) : null
+        }
+        ListEmptyComponent={
+          !isLoading ? (
+            <View style={styles.emptyState}>
+              <ThemedText type="default" style={styles.emptyStateText}>
+                No movies found.
+              </ThemedText>
+            </View>
+          ) : (
+            <View style={styles.listFooter}>
+              <ActivityIndicator />
+            </View>
+          )
+        }
+      />
 
       {/* Add Movie Button */}
       <View style={styles.addButtonContainer}>
@@ -516,6 +613,19 @@ const styles = StyleSheet.create({
   modalButtonText: {
     fontSize: 12,
     color: '#FFFFFF',
+  },
+  listFooter: {
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyState: {
+    paddingTop: 40,
+    alignItems: 'center',
+  },
+  emptyStateText: {
+    fontSize: 14,
+    color: 'rgba(228, 206, 255, 0.8)',
   },
 });
 

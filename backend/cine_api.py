@@ -3,6 +3,8 @@ from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
 import uuid
+from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -13,15 +15,56 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 app = FastAPI(title = "CineSync API")
 
+# CORS configuration to allow React Native frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # You may replace "*" with your actual frontend origin later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/")
 def root():
     return {"status": "ok"}
 
 @app.get("/movies")
-def get_movies():
+def get_movies(
+    page: int = 1,
+    page_size: int = 50,
+    search: Optional[str] = None,
+):
+    """
+    Get movies with simple pagination and optional search.
+
+    Query params:
+    - page: 1-based page index
+    - page_size: number of items per page (max 100)
+    - search: optional substring to match in the movie title
+    """
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+    if page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="page_size must be between 1 and 100")
+
     try:
-        result = supabase.table("movies").select("*").execute()
-        return result.data
+        query = supabase.table("movies").select("*", count="exact")
+
+        # basic search on title
+        if search:
+            query = query.ilike("title", f"%{search}%")
+
+        start = (page - 1) * page_size
+        end = start + page_size - 1
+
+        result = query.range(start, end).execute()
+
+        return {
+            "page": page,
+            "page_size": page_size,
+            "total": result.count or 0,
+            "movies": result.data,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
