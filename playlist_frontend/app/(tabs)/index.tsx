@@ -6,155 +6,141 @@ import {
   View,
   TextInput,
   Pressable,
-  Modal,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { useAuth } from '@/providers/AuthProvider';
 
-const API_BASE_URL = 'http://localhost:8000'; // update if your backend runs elsewhere
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+if (!API_BASE_URL) {
+  console.warn('EXPO_PUBLIC_API_URL is not defined. Check your .env file.');
+}
+
+type HomeSection = {
+  id: string;
+  title: string;
+  style: 'rail' | 'grid';
+  movies: any[];
+};
 
 export default function HomeScreen() {
-  const [movies, setMovies] = useState<any[]>([]);
+  const { user } = useAuth();
+  const [sections, setSections] = useState<HomeSection[]>([]);
   const [search, setSearch] = useState('');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
-  const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [isAddModalVisible, setAddModalVisible] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const [newYear, setNewYear] = useState('');
-  const [newRuntime, setNewRuntime] = useState('');
-  const [newRating, setNewRating] = useState('');
-  const [newPosterUrl, setNewPosterUrl] = useState('');
+  const fetchHomeFeed = useCallback(
+    async (opts?: { refreshing?: boolean }) => {
+      if (!user) return;
 
-  const filteredMovies = useMemo(() => {
-    return movies
-      .slice()
-      .sort((a, b) => {
-        const yearA = a.release_year ?? 0;
-        const yearB = b.release_year ?? 0;
-        return sortOrder === 'asc' ? yearA - yearB : yearB - yearA;
-      });
-  }, [sortOrder, movies]);
-
-  const hasMore = movies.length < total;
-
-  const fetchMovies = useCallback(
-    async (options?: { page?: number; append?: boolean; currentSearch?: string }) => {
-      const targetPage = options?.page ?? 1;
-      const append = options?.append ?? false;
-      const searchQuery = options?.currentSearch ?? search;
+      const refreshing = opts?.refreshing ?? false;
 
       try {
-        if (append) {
-          setIsLoadingMore(true);
-        } else if (targetPage === 1 && !isRefreshing) {
+        if (refreshing) {
+          setIsRefreshing(true);
+        } else {
           setIsLoading(true);
         }
+        setError(null);
 
         const params = new URLSearchParams();
-        params.append('page', String(targetPage));
-        params.append('page_size', String(pageSize));
-        if (searchQuery.trim().length > 0) {
-          params.append('search', searchQuery.trim());
-        }
+        params.append('user_id', user.id);
+        params.append('max_candidates', '500');
 
-        const response = await fetch(`${API_BASE_URL}/movies?${params.toString()}`);
+        const response = await fetch(`${API_BASE_URL}/v1/home?${params.toString()}`);
         if (!response.ok) {
-          throw new Error('Failed to fetch movies');
+          throw new Error('Failed to load home feed');
         }
 
         const data = await response.json();
-
-        setTotal(data.total ?? 0);
-        setPage(data.page ?? targetPage);
-
-        setMovies((prev) =>
-          append ? [...prev, ...(data.movies ?? [])] : data.movies ?? []
-        );
-      } catch (error) {
-        console.error(error);
-        Alert.alert('Error', 'Failed to load movies. Please try again.');
+        setSections(data.sections ?? []);
+      } catch (err) {
+        console.error('Error loading home feed', err);
+        setError('Failed to load your personalized feed. Pull to refresh to try again.');
       } finally {
         setIsLoading(false);
         setIsRefreshing(false);
-        setIsLoadingMore(false);
       }
     },
-    [pageSize, search, isRefreshing]
+    [user]
   );
 
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      fetchMovies({ page: 1, append: false, currentSearch: search });
-    }, 300);
-
-    return () => clearTimeout(timeout);
-  }, [search, fetchMovies]);
+    fetchHomeFeed();
+  }, [fetchHomeFeed]);
 
   const handleRefresh = () => {
-    setIsRefreshing(true);
-    fetchMovies({ page: 1, append: false });
+    if (!user) return;
+    fetchHomeFeed({ refreshing: true });
   };
 
-  const handleLoadMore = () => {
-    if (isLoadingMore || isLoading) return;
-    if (!hasMore) return;
-    fetchMovies({ page: page + 1, append: true });
-  };
+  // Filter sections by search text (client-side) on movie title
+  const filteredSections = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return sections;
 
-  const handleAddMovie = () => {
-    const title = newTitle.trim();
-    const posterUrl = newPosterUrl.trim();
+    return sections
+      .map((section) => {
+        const filteredMovies = (section.movies || []).filter((m: any) => {
+          const title = (m.title || '').toLowerCase();
+          return title.includes(q);
+        });
+        return { ...section, movies: filteredMovies };
+      })
+      .filter((section) => (section.movies || []).length > 0);
+  }, [sections, search]);
 
-    if (!title || !posterUrl) {
-      Alert.alert(
-        'Missing information',
-        'Please enter at least a title and poster URL.'
-      );
-      return;
-    }
+  const renderRailCard = (movie: any) => {
+    const title: string = movie.title || '';
+    const releaseDate: string | null = movie.release_date || null;
+    const year = releaseDate ? releaseDate.slice(0, 4) : '';
+    const posterPath: string | null = movie.poster_path || null;
+    const similarity: number | null =
+      typeof movie.similarity === 'number' ? movie.similarity : null;
 
-    const yearNum = newYear ? parseInt(newYear, 10) : undefined;
-    const runtimeNum = newRuntime ? parseInt(newRuntime, 10) : undefined;
-    const nowIso = new Date().toISOString();
+    // similarity is in [-1, 1]; we convert to a loose match %
+    const matchPercent =
+      similarity !== null ? Math.round(Math.max(0, Math.min(1, similarity)) * 100) : null;
 
-    const newMovie = {
-      idx: movies.length,
-      id: `local-${Date.now()}`,
-      title,
-      release_year: Number.isNaN(yearNum) ? undefined : yearNum,
-      runtime_minutes: Number.isNaN(runtimeNum) ? undefined : runtimeNum,
-      content_rating: newRating.trim() || 'NR',
-      poster_url: posterUrl,
-      synopsis: null,
-      external_ids: {},
-      created_at: nowIso,
-      updated_at: nowIso,
-    };
+    const posterUrl = posterPath
+      ? `https://image.tmdb.org/t/p/w500${posterPath}`
+      : 'https://via.placeholder.com/300x450.png?text=No+Image';
 
-    setMovies((prev: any[]) => [newMovie, ...prev]);
-    setNewTitle('');
-    setNewYear('');
-    setNewRuntime('');
-    setNewRating('');
-    setNewPosterUrl('');
-    setAddModalVisible(false);
-  };
-
-  const toggleSortOrder = () => {
-    setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    return (
+      <Pressable style={styles.railCard}>
+        <View style={styles.railPosterWrapper}>
+          <Image source={{ uri: posterUrl }} style={styles.railPoster} contentFit="cover" />
+        </View>
+        <View style={styles.railCardBody}>
+          <ThemedText
+            numberOfLines={1}
+            type="defaultSemiBold"
+            style={styles.railCardTitle}
+          >
+            {title}
+          </ThemedText>
+          <View style={styles.railMetaRow}>
+            {year ? (
+              <ThemedText type="default" style={styles.railCardMeta}>
+                {year}
+              </ThemedText>
+            ) : null}
+            {matchPercent !== null ? (
+              <View style={styles.matchBadge}>
+                <ThemedText type="defaultSemiBold" style={styles.matchBadgeText}>
+                  {matchPercent}% match
+                </ThemedText>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </Pressable>
+    );
   };
 
   return (
@@ -162,232 +148,80 @@ export default function HomeScreen() {
       {/* Header */}
       <View style={styles.header}>
         <ThemedText type="title" style={styles.title}>
-          CineSync Movie Gallery
+          Your CineSync Home
         </ThemedText>
         <ThemedText type="default" style={styles.subtitle}>
-          Search our CineSync mock movie catalog by title.
+          Personalized movie seleciton based on your vibe.
         </ThemedText>
       </View>
 
-      {/* Search + Sort */}
+      {/* Search */}
       <View style={styles.searchContainer}>
         <TextInput
           value={search}
           onChangeText={setSearch}
-          placeholder="Search movies by title..."
+          placeholder="Search within your picks..."
           placeholderTextColor="rgba(228, 206, 255, 0.6)"
           style={styles.searchInput}
           autoCorrect={false}
           autoCapitalize="none"
         />
-        <Pressable style={styles.sortToggle} onPress={toggleSortOrder}>
-          <ThemedText type="defaultSemiBold" style={styles.sortToggleLabel}>
-            {sortOrder === 'asc' ? 'Year ↑' : 'Year ↓'}
-          </ThemedText>
-        </Pressable>
       </View>
 
-      {/* Movie Grid */}
-      <FlatList
-        data={filteredMovies}
-        keyExtractor={(movie) => movie.id}
-        numColumns={2}
-        renderItem={({ item: movie }) => (
-          <View style={styles.card}>
-            <View style={styles.posterWrapper}>
-              <Image
-                source={{ uri: movie.poster_url }}
-                style={styles.poster}
-                contentFit="cover"
-              />
-            </View>
-
-            <View style={styles.cardBody}>
-              <ThemedText
-                numberOfLines={1}
-                type="defaultSemiBold"
-                style={styles.cardTitle}
-              >
-                {movie.title}
+      {/* Content */}
+      {isLoading && !isRefreshing ? (
+        <View style={styles.loaderContainer}>
+          <ActivityIndicator />
+          <ThemedText type="default" style={styles.loaderText}>
+            Pulling your vibe-aligned picks...
+          </ThemedText>
+        </View>
+      ) : (
+        <ScrollView
+          style={styles.list}
+          contentContainerStyle={styles.railsContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={undefined}
+        >
+          {error ? (
+            <View style={styles.errorContainer}>
+              <ThemedText type="default" style={styles.errorText}>
+                {error}
               </ThemedText>
-
-              <ThemedText type="default" style={styles.cardYear}>
-                {movie.release_year}
-              </ThemedText>
-
-              <View style={styles.cardMetaRow}>
-                <View style={styles.badge}>
-                  <ThemedText
-                    type="defaultSemiBold"
-                    style={styles.badgeText}
-                  >
-                    {movie.content_rating ?? 'NR'}
-                  </ThemedText>
-                </View>
-
-                <ThemedText type="default" style={styles.runtime}>
-                  {movie.runtime_minutes
-                    ? `${movie.runtime_minutes} min`
-                    : '—'}
-                </ThemedText>
-              </View>
             </View>
-          </View>
-        )}
-        columnWrapperStyle={styles.grid}
-        contentContainerStyle={styles.listContent}
-        style={styles.list}
-        showsVerticalScrollIndicator={false}
-        onEndReached={handleLoadMore}
-        onEndReachedThreshold={0.5}
-        refreshing={isRefreshing}
-        onRefresh={handleRefresh}
-        ListFooterComponent={
-          isLoadingMore ? (
-            <View style={styles.listFooter}>
-              <ActivityIndicator />
-            </View>
-          ) : null
-        }
-        ListEmptyComponent={
-          !isLoading ? (
+          ) : null}
+
+          {filteredSections.length === 0 && !error ? (
             <View style={styles.emptyState}>
               <ThemedText type="default" style={styles.emptyStateText}>
-                No movies found.
+                No recommendations yet. Try running the vibe quiz or check back after we ingest
+                more movies.
               </ThemedText>
             </View>
           ) : (
-            <View style={styles.listFooter}>
-              <ActivityIndicator />
-            </View>
-          )
-        }
-      />
-
-      {/* Add Movie Button */}
-      <View style={styles.addButtonContainer}>
-        <Pressable
-          style={styles.addButton}
-          onPress={() => setAddModalVisible(true)}
-        >
-          <ThemedText type="defaultSemiBold" style={styles.addButtonLabel}>
-            + Add Movie
-          </ThemedText>
-        </Pressable>
-      </View>
-
-      {/* Add Movie Modal */}
-      <Modal
-        visible={isAddModalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setAddModalVisible(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <ThemedText type="title" style={styles.modalTitle}>
-              Add Movie
-            </ThemedText>
-
-            <ScrollView
-              style={styles.modalForm}
-              contentContainerStyle={styles.modalFormContent}
-              keyboardShouldPersistTaps="handled"
-            >
-              <FormField
-                label="Title"
-                value={newTitle}
-                onChangeText={setNewTitle}
-                placeholder="Nice Guys"
-              />
-              <FormField
-                label="Release Year"
-                value={newYear}
-                onChangeText={setNewYear}
-                placeholder="2016"
-                keyboardType="numeric"
-              />
-              <FormField
-                label="Runtime (minutes)"
-                value={newRuntime}
-                onChangeText={setNewRuntime}
-                placeholder="116"
-                keyboardType="numeric"
-              />
-              <FormField
-                label="Content Rating"
-                value={newRating}
-                onChangeText={setNewRating}
-                placeholder="R, PG-13, etc."
-              />
-              <FormField
-                label="Poster URL"
-                value={newPosterUrl}
-                onChangeText={setNewPosterUrl}
-                placeholder="https://image.tmdb.org/t/p/original/..."
-                autoCapitalize="none"
-              />
-            </ScrollView>
-
-            <View style={styles.modalActions}>
-              <Pressable
-                style={[styles.modalButton, styles.modalButtonSecondary]}
-                onPress={() => setAddModalVisible(false)}
-              >
-                <ThemedText
-                  type="defaultSemiBold"
-                  style={styles.modalButtonText}
-                >
-                  Cancel
-                </ThemedText>
-              </Pressable>
-
-              <Pressable
-                style={[styles.modalButton, styles.modalButtonPrimary]}
-                onPress={handleAddMovie}
-              >
-                <ThemedText
-                  type="defaultSemiBold"
-                  style={styles.modalButtonText}
-                >
-                  Save
-                </ThemedText>
-              </Pressable>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+            filteredSections.map((section) => (
+              <View key={section.id} style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <ThemedText type="title" style={styles.sectionTitle}>
+                    {section.title}
+                  </ThemedText>
+                </View>
+                <FlatList
+                  data={section.movies}
+                  keyExtractor={(movie: any) => String(movie.id)}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.railListContent}
+                  renderItem={({ item }) => renderRailCard(item)}
+                />
+              </View>
+            ))
+          )}
+        </ScrollView>
+      )}
     </ThemedView>
   );
 }
-
-// Small reusable component for inputs
-const FormField = ({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-  keyboardType,
-  autoCapitalize,
-}: any) => (
-  <>
-    <ThemedText type="default" style={styles.modalLabel}>
-      {label}
-    </ThemedText>
-    <TextInput
-      value={value}
-      onChangeText={onChangeText}
-      placeholder={placeholder}
-      keyboardType={keyboardType}
-      placeholderTextColor="rgba(228, 206, 255, 0.6)"
-      style={styles.modalInput}
-      autoCapitalize={autoCapitalize}
-    />
-  </>
-);
 
 const styles = StyleSheet.create({
   screen: {
@@ -428,40 +262,38 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 160, 255, 0.7)',
     color: '#FFFFFF',
     fontSize: 13,
-    marginRight: 10,
-  },
-  sortToggle: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(45, 14, 80, 0.95)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 160, 255, 0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sortToggleLabel: {
-    fontSize: 11,
-    color: '#FDF7FF',
   },
   list: {
     flex: 1,
   },
-  listContent: {
+  railsContent: {
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 40,
   },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
+  section: {
+    marginBottom: 18,
   },
-  card: {
-    width: '47%',
-    borderRadius: 14,
+  sectionHeader: {
+    paddingHorizontal: 4,
+    marginBottom: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+  sectionTitle: {
+    fontSize: 16,
+    color: '#FFFFFF',
+  },
+  railListContent: {
+    paddingRight: 4,
+  },
+  railCard: {
+    width: 140,
+    marginRight: 12,
+    borderRadius: 16,
     overflow: 'hidden',
-    backgroundColor: 'rgba(17, 4, 33, 0.9)',
+    backgroundColor: 'rgba(17, 4, 33, 0.95)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255, 160, 255, 0.4)',
     shadowColor: '#000',
@@ -469,155 +301,62 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.45,
     shadowRadius: 12,
     elevation: 6,
-    marginBottom: 16,
   },
-  posterWrapper: {
+  railPosterWrapper: {
     width: '100%',
-    aspectRatio: 1 / 1.05,
+    aspectRatio: 2 / 3,
     overflow: 'hidden',
   },
-  poster: {
+  railPoster: {
     width: '100%',
     height: '100%',
   },
-  cardBody: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginLeft: 4,
+  railCardBody: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     marginBottom: 4,
   },
-  cardTitle: {
-    fontSize: 14,
+  railCardTitle: {
+    fontSize: 13,
     color: '#FFFFFF',
     fontWeight: '600',
-    marginBottom: 3,
-  },
-  cardYear: {
-    fontSize: 11,
-    color: '#F4ECFF',
-    marginBottom: 5,
-  },
-  cardMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  badge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 200, 255, 0.8)',
-    backgroundColor: 'rgba(58, 10, 85, 0.95)',
-    marginRight: 6,
-  },
-  badgeText: {
-    fontSize: 10,
-    color: '#FFF8F8',
-  },
-  runtime: {
-    fontSize: 11,
-    color: '#F8F5FF',
-  },
-  addButtonContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 20,
-    alignItems: 'center',
-  },
-  addButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: 'rgba(126, 52, 255, 1)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    elevation: 8,
-  },
-  addButtonLabel: {
-    fontSize: 13,
-    color: '#FFFFFF',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-  },
-  modalContent: {
-    width: '100%',
-    maxWidth: 420,
-    borderRadius: 24,
-    backgroundColor: '#0B0218',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 160, 255, 0.5)',
-    paddingTop: 18,
-    paddingBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 18 },
-    shadowOpacity: 0.6,
-    shadowRadius: 24,
-    elevation: 12,
-  },
-  modalTitle: {
-    fontSize: 18,
-    color: '#FFFFFF',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  modalForm: {
-    maxHeight: 260,
-  },
-  modalFormContent: {
-    paddingHorizontal: 18,
-    paddingBottom: 8,
-  },
-  modalLabel: {
-    fontSize: 12,
-    color: 'rgba(228, 206, 255, 0.9)',
-    marginTop: 8,
     marginBottom: 4,
   },
-  modalInput: {
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(24, 9, 44, 0.95)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 160, 255, 0.7)',
-    color: '#FFFFFF',
-    fontSize: 13,
-  },
-  modalActions: {
+  railMetaRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    paddingHorizontal: 18,
-    paddingTop: 8,
-    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  modalButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+  railCardMeta: {
+    fontSize: 11,
+    color: '#F4ECFF',
+  },
+  matchBadge: {
     borderRadius: 999,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: 'rgba(126, 52, 255, 0.9)',
   },
-  modalButtonPrimary: {
-    backgroundColor: 'rgba(126, 52, 255, 1)',
-  },
-  modalButtonSecondary: {
-    backgroundColor: 'rgba(34, 16, 60, 0.95)',
-  },
-  modalButtonText: {
-    fontSize: 12,
+  matchBadgeText: {
+    fontSize: 10,
     color: '#FFFFFF',
   },
-  listFooter: {
-    paddingVertical: 16,
+  loaderContainer: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  loaderText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: 'rgba(228, 206, 255, 0.8)',
+  },
+  errorContainer: {
+    paddingVertical: 12,
+  },
+  errorText: {
+    fontSize: 12,
+    color: '#FF8E9E',
   },
   emptyState: {
     paddingTop: 40,
@@ -626,6 +365,7 @@ const styles = StyleSheet.create({
   emptyStateText: {
     fontSize: 14,
     color: 'rgba(228, 206, 255, 0.8)',
+    textAlign: 'center',
   },
 });
 

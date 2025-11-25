@@ -5,11 +5,12 @@ import React, {
   useEffect,
   ReactNode,
 } from 'react';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
 
 type AuthContextValue = {
   isAuthenticated: boolean;
   isLoading: boolean;
+  user: User | null;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -34,29 +35,24 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
 
   // On mount, restore session and set up auth listener
   useEffect(() => {
     const init = async () => {
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-        setIsAuthenticated(!!session);
-      } catch (e) {
-        console.error('[AuthProvider] Error getting session', e);
-        setIsAuthenticated(false);
-      } finally {
-        setIsLoading(false);
-      }
+      const { data: { session }, error } = await supabase.auth.getSession();
+      if (error) console.error(error);
+      setIsAuthenticated(!!session);
+      setUser(session?.user ?? null);
+      setIsLoading(false);
     };
-
     init();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsAuthenticated(!!session);
+      setUser(session?.user ?? null);
     });
 
     return () => {
@@ -107,6 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         signIn,
         signUp,
+        user,
         signOut,
         supabase,
       }}
