@@ -361,6 +361,73 @@ def compute_movie_vibe(movie: dict) -> list[float]:
     v = [max(-1.0, min(1.0, val)) for val in v]
     return v
 
+# --- TMDB search + upsert helpers for on-demand ingestion ---
+
+
+def tmdb_search_movies(query: str, page: int = 1, include_adult: bool = False) -> list[dict]:
+    """
+    Call TMDB's /search/movie endpoint and return the list of results.
+
+    This is used for on-demand ingestion when a user searches for a movie
+    that we might not yet have in our local database.
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    data = tmdb_get(
+        "/search/movie",
+        params={
+            "query": query,
+            "page": page,
+            "include_adult": include_adult,
+            "language": "en-US",
+        },
+    )
+    return data.get("results") or []
+
+
+def upsert_movie_and_vibe_from_tmdb(movie: dict) -> None:
+    """
+    Given a TMDB movie payload, upsert a row into public.movies and public.movie_vibes.
+
+    Assumes:
+    - The Supabase public.movies table uses the TMDB movie id as its primary key (id).
+    - The public.movie_vibes table uses movie_id as FK to movies.id.
+    """
+    mid = movie.get("id")
+    if mid is None:
+        return
+
+    genre_ids = extract_genre_ids(movie)
+
+    movie_row = {
+        "id": mid,
+        "title": movie.get("title") or movie.get("name"),
+        "original_title": movie.get("original_title"),
+        "overview": movie.get("overview"),
+        "release_date": movie.get("release_date"),
+        "runtime_minutes": None,  # can be filled by a detail fetch later
+        "poster_path": movie.get("poster_path"),
+        "popularity": movie.get("popularity"),
+        "vote_average": movie.get("vote_average"),
+        "vote_count": movie.get("vote_count"),
+        "original_language": movie.get("original_language"),
+        "genres": genre_ids,
+        "is_adult": movie.get("adult", False),
+    }
+
+    # Upsert movie metadata
+    supabase.table("movies").upsert(movie_row, on_conflict="id").execute()
+
+    # Compute and upsert vibe vector
+    vibe_vector = compute_movie_vibe(movie)
+    vibe_row = {
+        "movie_id": mid,
+        "vibe_vector": vibe_vector,
+    }
+    supabase.table("movie_vibes").upsert(vibe_row, on_conflict="movie_id").execute()
+
 # --- User/movie similarity helpers ---
 
 def cosine_similarity(u_vec: list[float], m_vec: list[float]) -> float:
@@ -380,6 +447,59 @@ def cosine_similarity(u_vec: list[float], m_vec: list[float]) -> float:
     if norm_u <= 0.0 or norm_m <= 0.0:
         return 0.0
     return dot / (math.sqrt(norm_u) * math.sqrt(norm_m))
+
+
+def attach_similarity_to_movies(movies: list[dict], user_id: Optional[str]) -> list[dict]:
+    """
+    Given a list of movie rows and an optional user_id, attach a 'similarity'
+    field based on the user's preference_vector and each movie's vibe_vector.
+
+    If user_id is None or no preference_vector exists, similarity is left as 0.0.
+    """
+    if not movies or not user_id:
+      # No user context; just return movies with similarity 0.0
+      return [{**m, "similarity": 0.0} for m in movies]
+
+    # Load user preference vector
+    prefs_res = (
+        supabase.table("user_preferences")
+        .select("preference_vector")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if not prefs_res.data:
+        return [{**m, "similarity": 0.0} for m in movies]
+
+    pref_vec = prefs_res.data[0].get("preference_vector") or []
+    if not pref_vec or len(pref_vec) != 10:
+        return [{**m, "similarity": 0.0} for m in movies]
+
+    # Load vibe vectors for all movies in a single query
+    movie_ids = [m.get("id") for m in movies if m.get("id") is not None]
+    if not movie_ids:
+        return [{**m, "similarity": 0.0} for m in movies]
+
+    mv_res = (
+        supabase.table("movie_vibes")
+        .select("movie_id, vibe_vector")
+        .in_("movie_id", movie_ids)
+        .execute()
+    )
+    vibe_map = {}
+    for row in mv_res.data or []:
+        vid = row.get("movie_id")
+        vvec = row.get("vibe_vector") or []
+        if vid is not None and vvec and len(vvec) == len(pref_vec):
+            vibe_map[vid] = vvec
+
+    enriched: list[dict] = []
+    for m in movies:
+        mid = m.get("id")
+        vvec = vibe_map.get(mid)
+        sim = cosine_similarity(pref_vec, vvec) if vvec else 0.0
+        enriched.append({**m, "similarity": sim})
+
+    return enriched
 
 @app.get("/")
 def root():
@@ -901,6 +1021,88 @@ def get_home_feed(user_id: str, max_candidates: int = 500):
         return {
             "user_id": user_id,
             "sections": sections,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Search endpoint: on-demand TMDB ingestion + local search ---
+
+
+@app.get("/v1/search/movies")
+def search_movies(
+    q: str,
+    user_id: Optional[str] = None,
+    limit: int = 20,
+    include_adult: bool = False,
+):
+    """
+    Search for movies by title.
+
+    Behavior:
+    - First search the local movies table with a case-insensitive ILIKE on title.
+    - If we find fewer than a threshold of local results, call TMDB's /search/movie
+      to fetch additional matches, upsert them (and their vibe vectors) into
+      movies + movie_vibes, then re-query locally.
+    - Optionally attach a 'similarity' score for each movie if user_id is provided.
+
+    Query params:
+    - q: search query string (required)
+    - user_id: optional user id to compute similarity against preference_vector
+    - limit: max number of results to return
+    - include_adult: whether to include adult titles in TMDB search (default False)
+    """
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' must not be empty.")
+
+    if limit <= 0 or limit > 50:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 50")
+
+    try:
+        # 1) Local search
+        local_res = (
+            supabase.table("movies")
+            .select("*")
+            .ilike("title", f"%{query}%")
+            .order("popularity", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        local_movies = local_res.data or []
+
+        MIN_LOCAL = 8
+
+        # 2) If we don't have enough local matches, call TMDB and ingest
+        if len(local_movies) < MIN_LOCAL:
+            tmdb_results = tmdb_search_movies(query, page=1, include_adult=include_adult)
+
+            for m in tmdb_results:
+                try:
+                    upsert_movie_and_vibe_from_tmdb(m)
+                except Exception as e:
+                    # Log but don't fail the entire search because of one movie
+                    print(f"Error upserting TMDB movie {m.get('id')}: {e}")
+
+            # Re-query local after ingestion
+            local_res = (
+                supabase.table("movies")
+                .select("*")
+                .ilike("title", f"%{query}%")
+                .order("popularity", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            local_movies = local_res.data or []
+
+        # 3) Attach similarity if we have a user context
+        enriched_movies = attach_similarity_to_movies(local_movies, user_id)
+
+        return {
+            "query": query,
+            "count": len(enriched_movies),
+            "results": enriched_movies,
         }
     except HTTPException:
         raise

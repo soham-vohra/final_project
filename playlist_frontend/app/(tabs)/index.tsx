@@ -7,6 +7,8 @@ import {
   TextInput,
   Pressable,
   ActivityIndicator,
+  Modal,
+  Dimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 
@@ -33,6 +35,12 @@ export default function HomeScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [globalResults, setGlobalResults] = useState<any[] | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const [selectedMovie, setSelectedMovie] = useState<any | null>(null);
 
   const fetchHomeFeed = useCallback(
     async (opts?: { refreshing?: boolean }) => {
@@ -68,6 +76,50 @@ export default function HomeScreen() {
       }
     },
     [user]
+  );
+
+  const runGlobalSearch = useCallback(
+    async () => {
+      if (!user) return;
+      const q = search.trim();
+      if (!q) {
+        setGlobalResults(null);
+        setSearchError(null);
+        return;
+      }
+      if (!API_BASE_URL) {
+        console.warn('API base URL is not configured; cannot run search.');
+        setSearchError('Search is temporarily unavailable.');
+        return;
+      }
+
+      try {
+        setIsSearching(true);
+        setSearchError(null);
+
+        const params = new URLSearchParams();
+        params.append('q', q);
+        if (user.id) {
+          params.append('user_id', user.id);
+        }
+
+        const res = await fetch(`${API_BASE_URL}/v1/search/movies?${params.toString()}`);
+        if (!res.ok) {
+          const txt = await res.text();
+          console.error('Search request failed', txt);
+          throw new Error('Search failed');
+        }
+
+        const data = await res.json();
+        setGlobalResults(data.results ?? []);
+      } catch (err) {
+        console.error('Error running global search', err);
+        setSearchError('Something went wrong searching the wider catalog. Please try again.');
+      } finally {
+        setIsSearching(false);
+      }
+    },
+    [user, search]
   );
 
   useEffect(() => {
@@ -112,7 +164,10 @@ export default function HomeScreen() {
       : 'https://via.placeholder.com/300x450.png?text=No+Image';
 
     return (
-      <Pressable style={styles.railCard}>
+      <Pressable
+        style={styles.railCard}
+        onPress={() => setSelectedMovie(movie)}
+      >
         <View style={styles.railPosterWrapper}>
           <Image source={{ uri: posterUrl }} style={styles.railPoster} contentFit="cover" />
         </View>
@@ -160,11 +215,13 @@ export default function HomeScreen() {
         <TextInput
           value={search}
           onChangeText={setSearch}
-          placeholder="Search within your picks..."
+          placeholder="Find your favorite movies..."
           placeholderTextColor="rgba(228, 206, 255, 0.6)"
           style={styles.searchInput}
           autoCorrect={false}
           autoCapitalize="none"
+          returnKeyType="search"
+          onSubmitEditing={runGlobalSearch}
         />
       </View>
 
@@ -191,11 +248,53 @@ export default function HomeScreen() {
             </View>
           ) : null}
 
+          {searchError ? (
+            <View style={styles.errorContainer}>
+              <ThemedText type="default" style={styles.errorText}>
+                {searchError}
+              </ThemedText>
+            </View>
+          ) : null}
+
+          {isSearching && (
+            <View style={styles.searchStatusContainer}>
+              <ActivityIndicator />
+              <ThemedText type="default" style={styles.loaderText}>
+                Searching the wider catalog...
+              </ThemedText>
+            </View>
+          )}
+
+          {globalResults && !isSearching && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <ThemedText type="title" style={styles.sectionTitle}>
+                  Search results
+                </ThemedText>
+              </View>
+              {globalResults.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <ThemedText type="default" style={styles.emptyStateText}>
+                    No matches found. Try another title.
+                  </ThemedText>
+                </View>
+              ) : (
+                <FlatList
+                  data={globalResults}
+                  keyExtractor={(movie: any) => String(movie.id)}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.railListContent}
+                  renderItem={({ item }) => renderRailCard(item)}
+                />
+              )}
+            </View>
+          )}
+
           {filteredSections.length === 0 && !error ? (
             <View style={styles.emptyState}>
               <ThemedText type="default" style={styles.emptyStateText}>
-                No recommendations yet. Try running the vibe quiz or check back after we ingest
-                more movies.
+                We couldn't find any local hits. Press search to explore the Movie Universe
               </ThemedText>
             </View>
           ) : (
@@ -219,7 +318,250 @@ export default function HomeScreen() {
           )}
         </ScrollView>
       )}
+      {selectedMovie && (
+        <MovieDetailsModal
+          movie={selectedMovie}
+          onClose={() => setSelectedMovie(null)}
+        />
+      )}
     </ThemedView>
+  );
+}
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+function MovieDetailsModal({
+  movie,
+  onClose,
+}: {
+  movie: any;
+  onClose: () => void;
+}) {
+  const { user, supabase } = useAuth();
+
+  const [loading, setLoading] = useState(true);
+  const [movieRow, setMovieRow] = useState<any | null>(null);
+  const [movieVibe, setMovieVibe] = useState<number[] | null>(null);
+  const [userPref, setUserPref] = useState<number[] | null>(null);
+  const [isInWatchlist, setIsInWatchlist] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [addedMessage, setAddedMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!movie || !user) return;
+
+    const loadDetails = async () => {
+      setLoading(true);
+      try {
+        const { data: movieData } = await supabase
+          .from('movies')
+          .select('*')
+          .eq('id', movie.id)
+          .maybeSingle();
+
+        const { data: vibeData } = await supabase
+          .from('movie_vibes')
+          .select('vibe_vector')
+          .eq('movie_id', movie.id)
+          .maybeSingle();
+
+        const { data: prefData } = await supabase
+          .from('user_preferences')
+          .select('preference_vector')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('watchlist_movie_ids')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        setMovieRow(movieData || movie);
+        setMovieVibe(vibeData?.vibe_vector || null);
+        setUserPref(prefData?.preference_vector || null);
+
+        const ids = (profileData?.watchlist_movie_ids || []).map(Number);
+        setIsInWatchlist(ids.includes(Number(movie.id)));
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadDetails();
+  }, [movie, user]);
+
+  const addToWatchlist = async () => {
+    if (!user || saving) return;
+    setSaving(true);
+    setAddedMessage(null);
+
+    try {
+      const { data: profileData, error } = await supabase
+        .from('profiles')
+        .select('watchlist_movie_ids')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Error loading profile for watchlist update', error);
+        return;
+      }
+
+      const current = (profileData?.watchlist_movie_ids || []).map(Number);
+      const updated = Array.from(new Set([...current, Number(movie.id)]));
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ watchlist_movie_ids: updated })
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('Error updating watchlist', updateError);
+        return;
+      }
+
+      setIsInWatchlist(true);
+      setAddedMessage('Added to your watchlist');
+    } catch (e) {
+      console.error('Unexpected error adding to watchlist', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const vibePills = React.useMemo(() => {
+    if (!movieVibe) return [];
+    const v = movieVibe;
+    const pills: string[] = [];
+
+    const add = (val: number, pos: string, neg: string, t = 0.35) => {
+      if (val > t) pills.push(pos);
+      else if (val < -t) pills.push(neg);
+    };
+
+    add(v[0], 'Arthouse', 'Mainstream');
+    add(v[1], 'Dark Tone', 'Light Tone');
+    add(v[2], 'Slow Burn', 'Fast Paced');
+    add(v[6], 'Fantastical', 'Grounded');
+    add(v[9], 'Comfort Watch', 'Challenging');
+
+    return pills.slice(0, 4);
+  }, [movieVibe]);
+
+  const whyThisText = React.useMemo(() => {
+    if (!movieVibe || !userPref) return null;
+
+    const axes = [
+      { i: 0, pos: 'artsy films', neg: 'mainstream hits' },
+      { i: 1, pos: 'dark tones', neg: 'lighter moods' },
+      { i: 2, pos: 'slow-burn pacing', neg: 'fast energy' },
+      { i: 6, pos: 'fantastical worlds', neg: 'grounded stories' },
+      { i: 9, pos: 'comfort films', neg: 'challenging cinema' },
+    ];
+
+    const scores = axes.map(a => ({
+      ...a,
+      score: (userPref[a.i] || 0) * (movieVibe[a.i] || 0),
+    }));
+
+    const top = scores
+      .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+      .slice(0, 2);
+
+    if (!top.length) return null;
+
+    return `Because you tend to enjoy ${top
+      .map(t => (t.score > 0 ? t.pos : t.neg))
+      .join(' and ')}, this movie aligns strongly with your taste.`;
+  }, [movieVibe, userPref]);
+
+  return (
+    <Modal transparent animationType="fade" visible>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <Pressable
+          style={[styles.modalContainer, { maxHeight: SCREEN_HEIGHT * 0.9 }]}
+          onPress={(e) => e.stopPropagation()}
+        >
+          {loading ? (
+            <ActivityIndicator />
+          ) : (
+            <>
+              <Pressable style={styles.modalClose} onPress={onClose}>
+                <ThemedText style={{ color: '#fff' }}>✕</ThemedText>
+              </Pressable>
+
+              <Image
+                source={{
+                  uri: movie.poster_path
+                    ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+                    : undefined,
+                }}
+                style={styles.modalPoster}
+                contentFit="cover"
+              />
+
+              <View style={styles.modalTitleRow}>
+                <ThemedText style={styles.modalTitle}>{movieRow?.title}</ThemedText>
+                {typeof movie.similarity === 'number' && (
+                  <View style={styles.matchPillLarge}>
+                    <ThemedText style={styles.matchPillLargeText}>
+                      {Math.round(Math.max(0, Math.min(1, movie.similarity)) * 100)}% match
+                    </ThemedText>
+                  </View>
+                )}
+              </View>
+
+              <ThemedText style={styles.modalOverview} numberOfLines={6}>
+                {movieRow?.overview}
+              </ThemedText>
+
+              {whyThisText && (
+                <ThemedText style={styles.whyThisText}>
+                  {whyThisText}
+                </ThemedText>
+              )}
+
+              <View style={styles.modalVibesRow}>
+                {vibePills.map((pill) => (
+                  <View key={pill} style={styles.vibePill}>
+                    <ThemedText style={styles.vibePillText}>{pill}</ThemedText>
+                  </View>
+                ))}
+              </View>
+
+              <Pressable
+                style={[
+                  styles.watchlistButton,
+                  (isInWatchlist || saving) && { opacity: 0.7 },
+                ]}
+                disabled={isInWatchlist || saving}
+                onPress={addToWatchlist}
+              >
+                {saving ? (
+                  <View style={styles.watchlistButtonContent}>
+                    <ActivityIndicator style={styles.watchlistButtonSpinner} />
+                    <ThemedText style={styles.watchlistButtonText}>
+                      Adding...
+                    </ThemedText>
+                  </View>
+                ) : (
+                  <ThemedText style={styles.watchlistButtonText}>
+                    {isInWatchlist ? 'In Watchlist' : 'Add to Watchlist'}
+                  </ThemedText>
+                )}
+              </Pressable>
+
+              {addedMessage && (
+                <ThemedText style={styles.addedMessageText}>
+                  {addedMessage}
+                </ThemedText>
+              )}
+            </>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -351,6 +693,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: 'rgba(228, 206, 255, 0.8)',
   },
+  searchStatusContainer: {
+    paddingVertical: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   errorContainer: {
     paddingVertical: 12,
   },
@@ -366,6 +713,111 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(228, 206, 255, 0.8)',
     textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContainer: {
+    width: '90%',
+    backgroundColor: '#0B0218',
+    borderRadius: 22,
+    padding: 16,
+  },
+  modalPoster: {
+    width: '100%',
+    height: 260,
+    borderRadius: 16,
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 20,
+    color: '#FFFFFF',
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  modalOverview: {
+    fontSize: 13,
+    color: 'rgba(228,206,255,0.8)',
+    marginBottom: 12,
+  },
+  modalVibesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  modalClose: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 4,
+  },
+  vibePill: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    marginRight: 10,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(58, 10, 105, 0.95)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.85)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  vibePillText: {
+    fontSize: 12,
+    color: '#FFF7FF',
+  },
+  watchlistButton: {
+    backgroundColor: 'rgba(126, 52, 255, 1)',
+    paddingVertical: 12,
+    borderRadius: 999,
+    alignItems: 'center',
+  },
+  watchlistButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  watchlistButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  watchlistButtonSpinner: {
+    marginRight: 8,
+  },
+  addedMessageText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: 'rgba(228, 255, 228, 0.9)',
+    textAlign: 'center',
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  matchPillLarge: {
+    backgroundColor: 'rgba(126, 52, 255, 1)',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  matchPillLargeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  whyThisText: {
+    fontSize: 13,
+    color: 'rgba(255, 220, 255, 0.9)',
+    marginBottom: 16,
   },
 });
 
