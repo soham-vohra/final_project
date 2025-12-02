@@ -17,7 +17,7 @@ import { ThemedView } from '@/components/themed-view';
 import { useAuth } from '@/providers/AuthProvider';
 
 const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000';
+  process.env.EXPO_PUBLIC_API_URL;
 
 type ProfileRow = {
   id: string;
