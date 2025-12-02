@@ -39,6 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class QuizAnswer(BaseModel):
     questionId: str
     choice: Literal["A", "B"]
@@ -49,6 +50,40 @@ class PreferencesPayload(BaseModel):
     quizVersion: str
     answers: List[QuizAnswer]
     preferenceVector: List[float]
+
+
+# --- Watch and React payload model ---
+
+class WatchAndReactPayload(BaseModel):
+    user_id: str
+    rating: int
+    reaction: Literal["like", "meh", "dislike"]
+    review: Optional[str] = None
+    watched_at: Optional[datetime] = None
+
+# --- Social graph payload models ---
+
+class RelationshipRequestPayload(BaseModel):
+    """
+    Payload to initiate a follow / friend request.
+    We keep semantics as:
+    - user_id: the user initiating the request (follower)
+    - target_user_id: the user being followed / requested
+    """
+    user_id: str
+    target_user_id: str
+
+
+class RelationshipRespondPayload(BaseModel):
+    """
+    Payload to respond to an existing relationship request.
+
+    Only the target_user_id of a pending relationship may accept/reject it.
+    """
+    user_id: str
+    relationship_id: str
+    action: Literal["accept", "reject"]
+# --- Search endpoint: on-demand TMDB ingestion + local search ---
 
 
 # --- TMDB and vibe helpers ---
@@ -1108,3 +1143,438 @@ def search_movies(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# --- Social graph endpoints: user relationships (followers / following) ---
+
+@app.get("/v1/relationships")
+def list_relationships(user_id: str):
+    """
+    List relationships for a given user_id plus follower/following counts.
+
+    Semantics:
+    - user_relationships.user_id = follower (the one who initiated / follows)
+    - user_relationships.target_user_id = followed user
+
+    Returns:
+    - counts: followers / following
+    - relationships: list of other users with basic profile info and direction
+    """
+    try:
+        # 1) Basic counts for followers / following
+        following_res = (
+            supabase.table("user_relationships")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .eq("status", "accepted")
+            .execute()
+        )
+        followers_res = (
+            supabase.table("user_relationships")
+            .select("id", count="exact")
+            .eq("target_user_id", user_id)
+            .eq("status", "accepted")
+            .execute()
+        )
+
+        following_count = following_res.count or 0
+        followers_count = followers_res.count or 0
+
+        # 2) Fetch all relationships involving this user (any status)
+        rel_res = (
+            supabase.table("user_relationships")
+            .select("id, user_id, target_user_id, status, created_at, updated_at")
+            .or_(f"user_id.eq.{user_id},target_user_id.eq.{user_id}")
+            .execute()
+        )
+
+        relationships = rel_res.data or []
+
+        # Collect the "other" user IDs to hydrate from profiles
+        other_ids: set[str] = set()
+        for rel in relationships:
+            uid = rel.get("user_id")
+            tid = rel.get("target_user_id")
+            if uid == user_id and tid:
+                other_ids.add(tid)
+            elif tid == user_id and uid:
+                other_ids.add(uid)
+
+        profiles_map: dict[str, dict] = {}
+        if other_ids:
+            prof_res = (
+                supabase.table("profiles")
+                .select("id, display_name, avatar_url")
+                .in_("id", list(other_ids))
+                .execute()
+            )
+            for row in prof_res.data or []:
+                pid = row.get("id")
+                if pid:
+                    profiles_map[pid] = row
+
+        # 3) Build a clean, frontend-friendly payload
+        formatted = []
+        for rel in relationships:
+            rid = rel.get("id")
+            uid = rel.get("user_id")
+            tid = rel.get("target_user_id")
+            status = rel.get("status")
+
+            if not rid or (uid != user_id and tid != user_id):
+                continue
+
+            if uid == user_id:
+                direction = "following"
+                other_id = tid
+            else:
+                direction = "follower"
+                other_id = uid
+
+            if not other_id:
+                continue
+
+            prof = profiles_map.get(other_id, {})
+            formatted.append(
+                {
+                    "relationship_id": rid,
+                    "other_user_id": other_id,
+                    "direction": direction,
+                    "status": status,
+                    "display_name": prof.get("display_name"),
+                    "avatar_url": prof.get("avatar_url"),
+                    "created_at": rel.get("created_at"),
+                    "updated_at": rel.get("updated_at"),
+                }
+            )
+
+        return {
+            "user_id": user_id,
+            "counts": {
+                "followers": followers_count,
+                "following": following_count,
+            },
+            "relationships": formatted,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/relationships/request")
+def request_relationship(payload: RelationshipRequestPayload):
+    """
+    Initiate a relationship from user_id -> target_user_id.
+
+    This behaves like a "follow" or "friend request", stored as:
+    - user_id: follower / initiator
+    - target_user_id: followed user
+    - status: 'pending' (until accepted)
+    """
+    if payload.user_id == payload.target_user_id:
+        raise HTTPException(status_code=400, detail="Cannot follow yourself.")
+
+    try:
+        # Check if any relationship already exists between these two users
+        rel_res = (
+            supabase.table("user_relationships")
+            .select("id, user_id, target_user_id, status")
+            .execute()
+        )
+
+        existing = []
+        for row in rel_res.data or []:
+            uid = row.get("user_id")
+            tid = row.get("target_user_id")
+            if {uid, tid} == {payload.user_id, payload.target_user_id}:
+                existing.append(row)
+
+        if existing:
+            # If there's an accepted relationship, treat as already friends/following
+            for row in existing:
+                if row.get("status") == "accepted":
+                    raise HTTPException(status_code=400, detail="Relationship already accepted.")
+            # Otherwise, there's a pending or blocked relationship
+            raise HTTPException(status_code=400, detail="Relationship already exists or is pending.")
+
+        # Insert new pending relationship
+        insert_data = {
+            "user_id": payload.user_id,
+            "target_user_id": payload.target_user_id,
+            "status": "pending",
+        }
+        ins = supabase.table("user_relationships").insert(insert_data).execute()
+        if not ins.data:
+            raise HTTPException(status_code=500, detail="Failed to create relationship request.")
+
+        row = ins.data[0]
+        return {
+            "status": "ok",
+            "relationship_id": row.get("id"),
+            "user_id": payload.user_id,
+            "target_user_id": payload.target_user_id,
+            "relationship_status": row.get("status"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/relationships/respond")
+def respond_relationship(payload: RelationshipRespondPayload):
+    """
+    Respond to an existing relationship request.
+
+    Only the target_user_id of a pending relationship may accept or reject it.
+
+    - action = "accept" -> status set to 'accepted'
+    - action = "reject" -> relationship row is deleted
+    """
+    try:
+        rel_res = (
+            supabase.table("user_relationships")
+            .select("id, user_id, target_user_id, status")
+            .eq("id", payload.relationship_id)
+            .execute()
+        )
+
+        if not rel_res.data:
+            raise HTTPException(status_code=404, detail="Relationship not found.")
+
+        rel = rel_res.data[0]
+        target_id = rel.get("target_user_id")
+        status = rel.get("status")
+
+        if target_id != payload.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the target user may respond to this relationship."
+            )
+
+        if status != "pending":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot respond to relationship with status '{status}'."
+            )
+
+        if payload.action == "accept":
+            upd = (
+                supabase.table("user_relationships")
+                .update({"status": "accepted"})
+                .eq("id", payload.relationship_id)
+                .execute()
+            )
+            if not upd.data:
+                raise HTTPException(status_code=500, detail="Failed to update relationship.")
+            new_status = upd.data[0].get("status")
+            return {"status": "ok", "relationship_id": payload.relationship_id, "new_status": new_status}
+
+        elif payload.action == "reject":
+            _ = (
+                supabase.table("user_relationships")
+                .delete()
+                .eq("id", payload.relationship_id)
+                .execute()
+            )
+            return {"status": "ok", "relationship_id": payload.relationship_id, "new_status": "rejected"}
+
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action. Use 'accept' or 'reject'.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Watch and React endpoint ---
+@app.post("/v1/movies/{movie_id}/watch-and-react")
+def watch_and_react(movie_id: int, payload: WatchAndReactPayload):
+    """Record that a user just watched a movie, capture their rating/reaction,
+    append to watch_history, and update their preference_vector.
+
+    Body:
+    - user_id: UUID string
+    - rating: int (1-5)
+    - reaction: "like" | "meh" | "dislike"
+    - review: optional free text
+    - watched_at: optional ISO timestamp; defaults to now.
+    """
+    # 1) Validate rating range
+    if payload.rating < 1 or payload.rating > 5:
+        raise HTTPException(status_code=400, detail="rating must be between 1 and 5")
+
+    try:
+        # 2) Load movie vibe vector
+        mv_res = (
+            supabase.table("movie_vibes")
+            .select("vibe_vector")
+            .eq("movie_id", movie_id)
+            .execute()
+        )
+        if not mv_res.data:
+            raise HTTPException(status_code=404, detail="No vibe vector found for this movie_id")
+
+        movie_vibe = mv_res.data[0].get("vibe_vector") or []
+        if not movie_vibe:
+            raise HTTPException(status_code=500, detail="Movie vibe vector is empty or invalid")
+
+        dim = len(movie_vibe)
+
+        # 3) Load existing user preference_vector (if any)
+        prefs_res = (
+            supabase.table("user_preferences")
+            .select("preference_vector, quiz_version, raw_answers")
+            .eq("user_id", payload.user_id)
+            .execute()
+        )
+
+        base_vec: list[float]
+        quiz_version = None
+        raw_answers = None
+
+        if prefs_res.data:
+            row = prefs_res.data[0]
+            existing_vec = row.get("preference_vector") or []
+            quiz_version = row.get("quiz_version")
+            raw_answers = row.get("raw_answers")
+            if not existing_vec or len(existing_vec) != dim:
+                base_vec = [0.0] * dim
+            else:
+                base_vec = list(existing_vec)
+        else:
+            # No preferences yet: start from zero vector
+            base_vec = [0.0] * dim
+
+        # 4) Compute signal from rating + reaction
+        rating_score = (payload.rating - 3) / 2.0  # 1->-1, 3->0, 5->+1
+        if payload.reaction == "like":
+            reaction_factor = 1.0
+        elif payload.reaction == "meh":
+            reaction_factor = 0.3
+        else:  # "dislike"
+            reaction_factor = -1.0
+
+        signal = rating_score * reaction_factor
+
+        # If signal is near zero, do a very small update
+        alpha_base = 0.15
+        alpha = alpha_base * abs(signal)
+        if alpha == 0:
+            alpha = 0.05
+
+        direction = 1.0 if signal >= 0 else -1.0
+
+        new_vec: list[float] = []
+        for ui, mi in zip(base_vec, movie_vibe):
+            target = direction * mi
+            updated = (1 - alpha) * ui + alpha * target
+            # Clip to [-1, 1]
+            if updated > 1.0:
+                updated = 1.0
+            elif updated < -1.0:
+                updated = -1.0
+            new_vec.append(updated)
+
+        # 5) Upsert/update user_preferences with new vector
+        if prefs_res.data:
+            # Update only the preference_vector
+            upd_res = (
+                supabase.table("user_preferences")
+                .update({"preference_vector": new_vec})
+                .eq("user_id", payload.user_id)
+                .execute()
+            )
+        else:
+            # Bootstrap a new row, mark quiz_version as implicit
+            row = {
+                "user_id": payload.user_id,
+                "quiz_version": "implicit_v1",
+                "raw_answers": raw_answers or {},
+                "preference_vector": new_vec,
+            }
+            upd_res = (
+                supabase.table("user_preferences")
+                .upsert(row, on_conflict="user_id")
+                .execute()
+            )
+
+
+        # 6) Upsert into user_movie_reactions
+        umr_res = (
+            supabase.table("user_movie_reactions")
+            .select("reaction_id")
+            .eq("user_id", payload.user_id)
+            .eq("movie_id", movie_id)
+            .execute()
+        )
+
+        now_iso = datetime.utcnow().isoformat() + "Z"
+
+        if umr_res.data:
+            reaction_id = umr_res.data[0].get("reaction_id")
+            if not reaction_id:
+                reaction_id = str(uuid.uuid4())
+
+            update_data = {
+                "rating": payload.rating,
+                "reaction": payload.reaction,
+                "review": payload.review,
+                "updated_at": now_iso,
+            }
+
+            r_upd = (
+                supabase.table("user_movie_reactions")
+                .update(update_data)
+                .eq("user_id", payload.user_id)
+                .eq("movie_id", movie_id)
+                .execute()
+            )
+
+        else:
+            reaction_id = str(uuid.uuid4())
+            insert_data = {
+                "reaction_id": reaction_id,
+                "user_id": payload.user_id,
+                "movie_id": movie_id,
+                "rating": payload.rating,
+                "reaction": payload.reaction,
+                "review": payload.review,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+
+            r_ins = supabase.table("user_movie_reactions").insert(insert_data).execute()
+
+        # 7) Insert into watch_history (always allow rewatches)
+        watched_at = payload.watched_at.isoformat() if payload.watched_at else now_iso
+        wh_insert = {
+            "id": str(uuid.uuid4()),
+            "user_id": payload.user_id,
+            "movie_id": movie_id,
+            "reaction_id": reaction_id,
+            "watched_at": watched_at,
+        }
+
+        wh_res = supabase.table("watch_history").insert(wh_insert).execute()
+
+        return {
+            "status": "ok",
+            "user_id": payload.user_id,
+            "movie_id": movie_id,
+            "reaction_id": reaction_id,
+            "preference_vector": new_vec,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+if __name__ == "__main__":
+    import uvicorn
+    import os
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("cine_api:app", host="0.0.0.0", port=port, reload=False)

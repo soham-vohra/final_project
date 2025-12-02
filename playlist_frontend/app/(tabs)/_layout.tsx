@@ -30,6 +30,15 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="blend"
+        options={{
+          title: 'Blend',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="person.3.sequence.fill" color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="profile"
         options={{
           title: 'Profile',

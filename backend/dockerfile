@@ -1,0 +1,31 @@
+# backend/Dockerfile
+
+# Use a slim Python image
+FROM python:3.11-slim
+
+# Make Python output unbuffered (better logs)
+ENV PYTHONUNBUFFERED=1
+
+# Workdir inside the container
+WORKDIR /app
+
+# Install system deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy dependency list
+COPY requirements.txt .
+
+# Install Python deps
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy your backend code into the image
+COPY . .
+
+# Expose default port (Railway will override via PORT env)
+EXPOSE 8000
+
+# Run via uvicorn
+# Uses $PORT if set (Railway), otherwise 8000 for local
+CMD ["sh", "-c", "uvicorn cine_api:app --host 0.0.0.0 --port ${PORT:-8000}"]

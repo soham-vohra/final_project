@@ -86,24 +86,34 @@ export default function ProfileSetupScreen() {
       let avatar_url: string | null = null;
 
       if (avatarUri) {
-        const fileExt = avatarUri.split('.').pop() || 'jpg';
-        const filePath = `${user.id}/${Date.now()}.${fileExt}`;
+        // 1) Fetch the local file and read it as an ArrayBuffer
+        const response = await fetch(avatarUri);
+        const arrayBuffer = await response.arrayBuffer();
+        const fileBytes = new Uint8Array(arrayBuffer); // Supabase accepts this
 
-        const file = {
-          uri: avatarUri,
-          name: filePath.split('/').pop(),
-          type: 'image/jpeg',
-        } as any;
+        // 2) Try to get a sane extension; fallback to jpg
+        const uriParts = avatarUri.split('.');
+        const ext =
+          uriParts.length > 1 && uriParts[uriParts.length - 1].length < 6
+            ? uriParts[uriParts.length - 1]
+            : 'jpg';
 
+        const filePath = `${user.id}/${Date.now()}.${ext}`;
+
+        // 3) Upload the raw bytes to Supabase Storage
         const { error: uploadError } = await supabase.storage
           .from('avatars')
-          .upload(filePath, file);
+          .upload(filePath, fileBytes, {
+            upsert: true,
+            contentType: 'image/jpeg',
+          });
 
         if (uploadError) {
           console.error(uploadError);
           throw new Error('Failed to upload avatar.');
         }
 
+        // 4) Get a public URL and store it on the profile
         const { data: publicUrlData } = supabase.storage
           .from('avatars')
           .getPublicUrl(filePath);
