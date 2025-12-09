@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -8,13 +8,17 @@ import {
   RefreshControl,
   Pressable,
   Modal,
+  TouchableOpacity,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { Ionicons } from '@expo/vector-icons';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useAuth } from '@/providers/AuthProvider';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
+
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
 
 type ProfileRow = {
   display_name: string | null;
@@ -26,6 +30,7 @@ type ProfileRow = {
 
 export default function ProfileScreen() {
   const { user, supabase } = useAuth();
+  const router = useRouter();
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [watchlistMovies, setWatchlistMovies] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -40,6 +45,16 @@ export default function ProfileScreen() {
 
   const [followersCount, setFollowersCount] = useState(0);
   const [followingCount, setFollowingCount] = useState(0);
+
+  // Modals + lists
+  const [showFollowersModal, setShowFollowersModal] = useState(false);
+  const [showFollowingModal, setShowFollowingModal] = useState(false);
+  const [showRequestsModal, setShowRequestsModal] = useState(false);
+  const [followersList, setFollowersList] = useState<any[]>([]);
+  const [followingList, setFollowingList] = useState<any[]>([]);
+  const [requestsList, setRequestsList] = useState<any[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [listsLoading, setListsLoading] = useState(false);
 
   const loadProfile = async () => {
     if (!user || !supabase) {
@@ -139,6 +154,10 @@ export default function ProfileScreen() {
       } else if (typeof followersRes === 'number') {
         setFollowersCount(followersRes);
       }
+
+      // also reset lazy lists so they refresh when opened
+      setFollowersList([]);
+      setFollowingList([]);
     } catch (e) {
       console.error('Unexpected error loading profile', e);
       setError('Something went wrong while loading your profile.');
@@ -160,6 +179,196 @@ export default function ProfileScreen() {
       loadProfile();
     }, [user])
   );
+
+  const loadFollowersList = useCallback(async () => {
+    if (!supabase || !user) return;
+    setListsLoading(true);
+    try {
+      const { data: rels } = await supabase
+        .from('user_relationships')
+        .select('id, user_id, created_at')
+        .eq('target_user_id', user.id)
+        .eq('status', 'accepted');
+
+      const ids = (rels || []).map((r: any) => r.user_id).filter(Boolean);
+      if (ids.length === 0) {
+        setFollowersList([]);
+        return;
+      }
+
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, display_name, avatar_url')
+        .in('id', ids);
+
+      setFollowersList((profs || []).map((p: any) => ({ ...p })));
+    } catch (e) {
+      console.error('Error loading followers list', e);
+      setFollowersList([]);
+    } finally {
+      setListsLoading(false);
+    }
+  }, [supabase, user]);
+
+  const loadFollowingList = useCallback(async () => {
+    if (!supabase || !user) return;
+    setListsLoading(true);
+    try {
+      const { data: rels } = await supabase
+        .from('user_relationships')
+        .select('id, target_user_id, created_at')
+        .eq('user_id', user.id)
+        .eq('status', 'accepted');
+
+      const ids = (rels || []).map((r: any) => r.target_user_id).filter(Boolean);
+      if (ids.length === 0) {
+        setFollowingList([]);
+        return;
+      }
+
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, display_name, avatar_url')
+        .in('id', ids);
+
+      setFollowingList((profs || []).map((p: any) => ({ ...p })));
+    } catch (e) {
+      console.error('Error loading following list', e);
+      setFollowingList([]);
+    } finally {
+      setListsLoading(false);
+    }
+  }, [supabase, user]);
+
+  const loadFollowRequests = useCallback(async () => {
+    if (!supabase || !user) return;
+    setRequestsLoading(true);
+    try {
+      const { data: rels } = await supabase
+        .from('user_relationships')
+        .select('id, user_id, created_at')
+        .eq('target_user_id', user.id)
+        .eq('status', 'pending');
+
+      const requesterIds = (rels || []).map((r: any) => r.user_id).filter(Boolean);
+      if (requesterIds.length === 0) {
+        setRequestsList([]);
+        return;
+      }
+
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, display_name, avatar_url')
+        .in('id', requesterIds);
+
+      const relsById: Record<string, any> = {};
+      (rels || []).forEach((r: any) => {
+        relsById[r.user_id] = r;
+      });
+
+      setRequestsList((profs || []).map((p: any) => ({
+        ...p,
+        relationship_id: relsById[p.id]?.id,
+      })));
+    } catch (e) {
+      console.error('Error loading follow requests', e);
+      setRequestsList([]);
+    } finally {
+      setRequestsLoading(false);
+    }
+  }, [supabase, user]);
+
+  // Accept a follow request (the current user is the target)
+  const acceptRequest = async (relationshipId: string, requesterId: string) => {
+    if (!supabase || !user) return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE_URL}/v1/relationships/respond`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          user_id: user.id,
+          relationship_id: relationshipId,
+          action: 'accept',
+        }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error('Accept request failed', txt);
+        return false;
+      }
+
+      // Update local UI: mark this request as accepted so we can show "Follow back" action
+      setRequestsList((prev) => prev.map((p) => (p.relationship_id === relationshipId ? { ...p, accepted: true } : p)));
+      await loadProfile();
+      await loadFollowersList();
+      return true;
+    } catch (e) {
+      console.error('Error accepting request', e);
+      return false;
+    }
+  };
+
+  const rejectRequest = async (relationshipId: string) => {
+    if (!supabase || !user) return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE_URL}/v1/relationships/respond`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          user_id: user.id,
+          relationship_id: relationshipId,
+          action: 'reject',
+        }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error('Reject request failed', txt);
+        return false;
+      }
+
+      await loadFollowRequests();
+      return true;
+    } catch (e) {
+      console.error('Error rejecting request', e);
+      return false;
+    }
+  };
+
+  const followBack = async (targetUserId: string) => {
+    if (!supabase || !user) return false;
+    try {
+      // insert accepted relationship from current user -> target
+      const { error } = await supabase
+        .from('user_relationships')
+        .insert({ user_id: user.id, target_user_id: targetUserId, status: 'accepted' });
+
+      if (error) {
+        console.error('Follow back failed', error);
+        return false;
+      }
+
+      // refresh following list
+      await loadFollowingList();
+      return true;
+    } catch (e) {
+      console.error('Error following back', e);
+      return false;
+    }
+  };
 
   const formattedDate = useMemo(() => {
     if (!profile?.created_at) return null;
@@ -277,6 +486,21 @@ export default function ProfileScreen() {
 
   return (
     <ThemedView style={styles.screen}>
+      {/* Bell in top-right */}
+      <TouchableOpacity
+        style={styles.bellButton}
+        onPress={async () => {
+          setShowRequestsModal(true);
+          await loadFollowRequests();
+        }}
+      >
+        <Ionicons name="notifications-outline" size={22} color="#E6B3FF" />
+        {requestsList.length > 0 && (
+          <View style={styles.notificationBadge}>
+            <ThemedText style={styles.notificationBadgeText}>{requestsList.length}</ThemedText>
+          </View>
+        )}
+      </TouchableOpacity>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.contentContainer}
@@ -316,19 +540,31 @@ export default function ProfileScreen() {
 
           {/* Followers / Following Row */}
           <View style={styles.followRow}>
-            <View style={styles.followBlock}>
+            <Pressable
+              style={styles.followBlock}
+              onPress={async () => {
+                setShowFollowersModal(true);
+                await loadFollowersList();
+              }}
+            >
               <ThemedText type="defaultSemiBold" style={styles.followCount}>
                 {followersCount}
               </ThemedText>
               <ThemedText type="default" style={styles.followLabel}>Followers</ThemedText>
-            </View>
+            </Pressable>
 
-            <View style={styles.followBlock}>
+            <Pressable
+              style={styles.followBlock}
+              onPress={async () => {
+                setShowFollowingModal(true);
+                await loadFollowingList();
+              }}
+            >
               <ThemedText type="defaultSemiBold" style={styles.followCount}>
                 {followingCount}
               </ThemedText>
               <ThemedText type="default" style={styles.followLabel}>Following</ThemedText>
-            </View>
+            </Pressable>
           </View>
         </View>
 
@@ -544,6 +780,146 @@ export default function ProfileScreen() {
           </View>
         </Modal>
       )}
+
+      {/* Followers modal */}
+      <Modal transparent animationType="slide" visible={showFollowersModal} onRequestClose={() => setShowFollowersModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalListContainer}>
+            <View style={styles.modalHeaderRow}>
+              <ThemedText type="title" style={styles.sectionTitle}>Followers</ThemedText>
+              <Pressable onPress={() => setShowFollowersModal(false)} style={styles.modalClose}>
+                <ThemedText style={{ color: '#fff' }}>✕</ThemedText>
+              </Pressable>
+            </View>
+            {listsLoading ? (
+              <ActivityIndicator />
+            ) : followersList.length === 0 ? (
+              <ThemedText type="default">No followers yet.</ThemedText>
+            ) : (
+              <FlatList
+                data={followersList}
+                keyExtractor={(i: any) => String(i.id)}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={styles.userRow}
+                    onPress={() => {
+                      setShowFollowersModal(false);
+                      router.push(`/user/${item.id}`);
+                    }}
+                  >
+                    <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/48' }} style={styles.userAvatar} />
+                    <ThemedText style={styles.userName}>{item.display_name || 'User'}</ThemedText>
+                  </Pressable>
+                )}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Following modal */}
+      <Modal transparent animationType="slide" visible={showFollowingModal} onRequestClose={() => setShowFollowingModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalListContainer}>
+            <View style={styles.modalHeaderRow}>
+              <ThemedText type="title" style={styles.sectionTitle}>Following</ThemedText>
+              <Pressable onPress={() => setShowFollowingModal(false)} style={styles.modalClose}>
+                <ThemedText style={{ color: '#fff' }}>✕</ThemedText>
+              </Pressable>
+            </View>
+            {listsLoading ? (
+              <ActivityIndicator />
+            ) : followingList.length === 0 ? (
+              <ThemedText type="default">You are not following anyone yet.</ThemedText>
+            ) : (
+              <FlatList
+                data={followingList}
+                keyExtractor={(i: any) => String(i.id)}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={styles.userRow}
+                    onPress={() => {
+                      setShowFollowingModal(false);
+                      router.push(`/user/${item.id}`);
+                    }}
+                  >
+                    <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/48' }} style={styles.userAvatar} />
+                    <ThemedText style={styles.userName}>{item.display_name || 'User'}</ThemedText>
+                  </Pressable>
+                )}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Follow requests modal */}
+      <Modal transparent animationType="slide" visible={showRequestsModal} onRequestClose={() => setShowRequestsModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalListContainer}>
+            <View style={styles.modalHeaderRow}>
+              <ThemedText type="title" style={styles.sectionTitle}>Follow requests</ThemedText>
+              <Pressable onPress={() => setShowRequestsModal(false)} style={styles.modalClose}>
+                <ThemedText style={{ color: '#fff' }}>✕</ThemedText>
+              </Pressable>
+            </View>
+            {requestsLoading ? (
+              <ActivityIndicator />
+            ) : requestsList.length === 0 ? (
+              <ThemedText type="default">No pending requests.</ThemedText>
+            ) : (
+              <FlatList
+                data={requestsList}
+                keyExtractor={(i: any) => String(i.id)}
+                renderItem={({ item }) => (
+                  <View style={styles.requestRow}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/48' }} style={styles.userAvatar} />
+                      <ThemedText style={styles.userName}>{item.display_name || 'User'}</ThemedText>
+                    </View>
+                    <View style={styles.requestActions}>
+                      {item.accepted ? (
+                        <>
+                          <ThemedText style={{ color: 'rgba(228,206,255,0.8)', marginRight: 8 }}>Accepted</ThemedText>
+                          <Pressable
+                            style={[styles.actionButton, styles.actionButtonPrimary]}
+                            onPress={async () => {
+                              await followBack(item.id);
+                            }}
+                          >
+                            <ThemedText style={styles.actionButtonLabel}>Follow Back</ThemedText>
+                          </Pressable>
+                        </>
+                      ) : (
+                        <>
+                          <Pressable
+                            style={[styles.actionButton, styles.actionButtonPrimary]}
+                            onPress={async () => {
+                              if (!item.relationship_id) return;
+                              await acceptRequest(item.relationship_id, item.id);
+                            }}
+                          >
+                            <ThemedText style={styles.actionButtonLabel}>Accept</ThemedText>
+                          </Pressable>
+                          <Pressable
+                            style={styles.actionButton}
+                            onPress={async () => {
+                              if (!item.relationship_id) return;
+                              await rejectRequest(item.relationship_id);
+                            }}
+                          >
+                            <ThemedText style={styles.actionButtonLabel}>Reject</ThemedText>
+                          </Pressable>
+                        </>
+                      )}
+                    </View>
+                  </View>
+                )}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
@@ -814,6 +1190,82 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: 'rgba(228, 206, 255, 0.9)',
     marginTop: 4,
+  },
+  bellButton: {
+    marginLeft: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'absolute',
+    right: 20,
+    top: 28,
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: '#FF6B6B',
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  notificationBadgeText: {
+    fontSize: 10,
+    color: '#FFFFFF',
+  },
+  modalListContainer: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 16,
+    backgroundColor: '#0B0218',
+    padding: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.6)',
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  userAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    marginRight: 12,
+  },
+  userName: {
+    fontSize: 14,
+    color: '#FFFFFF',
+  },
+  requestRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  requestActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  actionButton: {
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'transparent',
+  },
+  actionButtonPrimary: {
+    backgroundColor: 'rgba(181, 120, 255, 0.95)',
+  },
+  actionButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: 13,
   },
 });
 

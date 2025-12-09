@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -194,6 +194,38 @@ export default function OtherUserProfileScreen() {
 
     loadProfile();
   }, [supabase, id]);
+
+  // Refresh follow status when returning to this profile
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!supabase || !id || !user || user.id === id) return;
+
+      const refreshFollowStatus = async () => {
+        try {
+          const { data: relData, error: relError } = await supabase
+            .from('user_relationships')
+            .select('status')
+            .eq('user_id', user.id)
+            .eq('target_user_id', id)
+            .maybeSingle();
+
+          if (relError) {
+            console.warn('Error loading relationship status', relError);
+          } else if (relData?.status === 'accepted') {
+            setFollowStatus('following');
+          } else if (relData?.status === 'pending') {
+            setFollowStatus('requested');
+          } else {
+            setFollowStatus('none');
+          }
+        } catch (e) {
+          console.error('Error refreshing follow status', e);
+        }
+      };
+
+      refreshFollowStatus();
+    }, [supabase, id, user])
+  );
 
   // Build avatar URL similarly to your own profile screen
   let avatarUri: string | undefined;
