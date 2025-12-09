@@ -3,12 +3,13 @@ import {
   ActivityIndicator,
   FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   TextInput,
   View,
+  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useAuth } from '@/providers/AuthProvider';
@@ -22,6 +23,10 @@ export default function BlendScreen() {
   const [searching, setSearching] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
   const [results, setResults] = React.useState<any[]>([]);
+  const [selectedUsers, setSelectedUsers] = React.useState<any[]>([]);
+  const [viewMode, setViewMode] = React.useState<'search' | 'results'>('search');
+  const [blendedMovies, setBlendedMovies] = React.useState<any[] | null>(null);
+  const [blendLoading, setBlendLoading] = React.useState(false);
 
   const searchTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -99,6 +104,77 @@ export default function BlendScreen() {
     router.push(`/user/${otherUserId}`);
   };
 
+  const handleStartBlend = (otherUser: any) => {
+    // Toggle selecting a user for the blend
+    if (!otherUser || !otherUser.id) return;
+    setSelectedUsers((prev) => {
+      const exists = prev.find((p) => p.id === otherUser.id);
+      if (exists) return prev.filter((p) => p.id !== otherUser.id);
+      return [...prev, otherUser];
+    });
+  };
+
+  const clearSelection = () => {
+    setSelectedUsers([]);
+    setBlendedMovies(null);
+    setViewMode('search');
+  };
+
+  const computeBlended = async () => {
+    if (!supabase || !user) return;
+    const participantIds = [String(user.id), ...selectedUsers.map((s) => String(s.id))];
+    setBlendLoading(true);
+    try {
+      // load all preference vectors for participants
+      const { data: prefs } = await supabase
+        .from('user_preferences')
+        .select('user_id, preference_vector')
+        .in('user_id', participantIds);
+
+      const prefById: Record<string, number[]> = {};
+      (prefs || []).forEach((p: any) => {
+        prefById[String(p.user_id)] = p.preference_vector || null;
+      });
+
+      // load movie vibes joined with movies
+      const { data: movieVibes } = await supabase
+        .from('movie_vibes')
+        .select('movie_id, vibe_vector, movie:movies(*)')
+        .limit(600);
+
+      const vrows = (movieVibes || []).map((mv: any) => {
+        const movie = mv.movie || {};
+        const vibe = mv.vibe_vector || null;
+        // compute avg cosine across participants
+        let sum = 0;
+        let count = 0;
+        participantIds.forEach((pid) => {
+          const vec = prefById[String(pid)] || null;
+          if (vec && vibe) {
+            // cosine
+            const dot = vec.reduce((s: number, v: number, i: number) => s + (v || 0) * (vibe[i] || 0), 0);
+            const normA = Math.sqrt(vec.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
+            const normB = Math.sqrt(vibe.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
+            const cos = normA === 0 || normB === 0 ? 0 : dot / (normA * normB);
+            sum += cos;
+            count += 1;
+          }
+        });
+        const blended = count > 0 ? sum / count : 0;
+        return { ...movie, similarity: blended };
+      });
+
+      vrows.sort((a: any, b: any) => (b.similarity || 0) - (a.similarity || 0));
+      setBlendedMovies(vrows);
+      setViewMode('results');
+    } catch (e) {
+      console.error('Error computing blended movies', e);
+      setBlendedMovies([]);
+    } finally {
+      setBlendLoading(false);
+    }
+  };
+
   const renderUserItem = ({ item }: { item: any }) => {
     const name = item.display_name || 'Unnamed user';
     const email = item.email || '';
@@ -139,91 +215,191 @@ export default function BlendScreen() {
     }
 
     return (
-      <Pressable
-        style={styles.userRow}
-        onPress={() => handlePressUser(item.id)}
-      >
-        <Image source={{ uri: avatarUri }} style={styles.userAvatarImage} />
-        <View style={styles.userMeta}>
-          <ThemedText type="defaultSemiBold" style={styles.userName}>
-            {name}
-          </ThemedText>
-          {email ? (
-            <ThemedText type="default" style={styles.userEmail}>
-              {email}
+      <View style={styles.userRow}>
+        <Pressable
+          style={styles.userContentPressable}
+          onPress={() => handlePressUser(item.id)}
+        >
+          <Image source={{ uri: avatarUri }} style={styles.userAvatarImage} />
+          <View style={styles.userMeta}>
+            <ThemedText type="defaultSemiBold" style={styles.userName}>
+              {name}
             </ThemedText>
-          ) : null}
-          <ThemedText type="default" style={styles.userSub}>
-            {subtitle}
-          </ThemedText>
-        </View>
-      </Pressable>
+            {email ? (
+              <ThemedText type="default" style={styles.userEmail}>
+                {email}
+              </ThemedText>
+            ) : null}
+            <ThemedText type="default" style={styles.userSub}>
+              {subtitle}
+            </ThemedText>
+          </View>
+        </Pressable>
+
+        <LinearGradient
+          colors={['#ff4ac7', '#ff2db0']}
+          start={[0, 0]}
+          end={[1, 1]}
+          style={styles.startBlendButton}
+        >
+          <Pressable onPress={() => handleStartBlend(item)} style={styles.startBlendPressable}>
+            <ThemedText style={styles.startBlendButtonText}>Start a blend</ThemedText>
+          </Pressable>
+        </LinearGradient>
+      </View>
     );
   };
 
   return (
     <ThemedView style={styles.screen}>
-      <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Header */}
-        <View style={styles.header}>
-          <ThemedText type="title" style={styles.title}>
-            Blend
-          </ThemedText>
-          <ThemedText type="default" style={styles.subtitle}>
-            Mix your vibe with friends and discover movies you&apos;ll all love.
-          </ThemedText>
-        </View>
+      <View style={styles.content}>
+        {viewMode === 'search' && (
+          <>
+            {/* Header */}
+            <View style={styles.header}>
+              <ThemedText type="title" style={styles.title}>
+                Blend
+              </ThemedText>
+              <ThemedText type="default" style={styles.subtitle}>
+                Mix your vibe with friends and discover movies you&apos;ll all love.
+              </ThemedText>
+            </View>
 
-        {/* Search bar */}
-        <View style={styles.searchContainer}>
-          <TextInput
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            onSubmitEditing={handleSearch}
-            placeholder="Search users"
-            placeholderTextColor="rgba(228, 206, 255, 0.45)"
-            style={styles.searchInput}
-            returnKeyType="search"
-          />
-        </View>
+            {/* Search bar */}
+            <View style={styles.searchContainer}>
+              <TextInput
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                onSubmitEditing={handleSearch}
+                placeholder="Search users"
+                placeholderTextColor="rgba(228, 206, 255, 0.45)"
+                style={styles.searchInput}
+                returnKeyType="search"
+              />
+            </View>
 
-        {/* Search feedback */}
-        {searching && (
-          <View style={styles.searchStatusRow}>
-            <ActivityIndicator size="small" />
-            <ThemedText type="default" style={styles.searchStatusText}>
-              Searching users...
-            </ThemedText>
-          </View>
+            {/* Selected users (chips) */}
+            {selectedUsers.length > 0 && (
+              <View style={styles.selectedRow}>
+                <View style={styles.selectedList}>
+                  {selectedUsers.map((s) => (
+                    <View key={s.id} style={styles.chip}>
+                      <Image source={{ uri: s.avatar_url || `https://api.dicebear.com/8.x/thumbs/svg?seed=${encodeURIComponent(s.display_name || 'user')}` }} style={styles.chipAvatar} />
+                      <ThemedText type="default" style={styles.chipText} numberOfLines={1}>
+                        {s.display_name || 'User'}
+                      </ThemedText>
+                    </View>
+                  ))}
+                </View>
+
+                <View style={styles.selectionActions}>
+                  <Pressable style={styles.clearButton} onPress={clearSelection}>
+                    <ThemedText type="default" style={styles.clearButtonText}>
+                      Clear
+                    </ThemedText>
+                  </Pressable>
+                  <LinearGradient colors={[ '#ff4ac7', '#ff2db0' ]} start={[0,0]} end={[1,1]} style={styles.computeButton}>
+                    <Pressable onPress={computeBlended} style={styles.computePressable}>
+                      {blendLoading ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <ThemedText style={styles.computeButtonText}>Compute blend</ThemedText>
+                      )}
+                    </Pressable>
+                  </LinearGradient>
+                </View>
+              </View>
+            )}
+
+            {/* Search feedback */}
+            {searching && (
+              <View style={styles.searchStatusRow}>
+                <ActivityIndicator size="small" />
+                <ThemedText type="default" style={styles.searchStatusText}>
+                  Searching users...
+                </ThemedText>
+              </View>
+            )}
+
+            {searchError && !searching && (
+              <View style={styles.searchStatusRow}>
+                <ThemedText type="default" style={styles.searchErrorText}>
+                  {searchError}
+                </ThemedText>
+              </View>
+            )}
+
+            {/* Search results */}
+            {results.length > 0 && (
+              <View style={styles.searchResultsWrapper}>
+                <ThemedText type="subtitle" style={styles.sectionTitle}>
+                  Search results
+                </ThemedText>
+                <FlatList
+                  data={results}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderUserItem}
+                  scrollEnabled={false}
+                />
+              </View>
+            )}
+          </>
         )}
 
-        {searchError && !searching && (
-          <View style={styles.searchStatusRow}>
-            <ThemedText type="default" style={styles.searchErrorText}>
-              {searchError}
-            </ThemedText>
-          </View>
-        )}
+        {viewMode === 'results' && (
+          <View>
+            <View style={styles.resultsHeader}>
+              <ThemedText type="subtitle" style={styles.sectionTitle}>
+                Blend with { [((user as any)?.display_name || (user as any)?.email), ...selectedUsers.map((s: any) => s.display_name)].filter(Boolean).join(', ') }
+              </ThemedText>
+              <View style={styles.resultsActions}>
+                <Pressable style={styles.clearButton} onPress={() => setViewMode('search') }>
+                  <ThemedText type="default" style={styles.clearButtonText}>Adjust selection</ThemedText>
+                </Pressable>
+                <Pressable style={styles.clearButton} onPress={clearSelection}>
+                  <ThemedText type="default" style={styles.clearButtonText}>Clear</ThemedText>
+                </Pressable>
+              </View>
+            </View>
 
-        {/* Search results */}
-        {results.length > 0 && (
-          <View style={styles.searchResultsWrapper}>
-            <ThemedText type="subtitle" style={styles.sectionTitle}>
-              Search results
-            </ThemedText>
-            <FlatList
-              data={results}
-              keyExtractor={(item) => item.id}
-              renderItem={renderUserItem}
-              scrollEnabled={false}
-            />
+            {/* Blended movie list */}
+            {blendLoading && (
+              <View style={{ marginTop: 12 }}>
+                <ActivityIndicator />
+              </View>
+            )}
+
+            {!blendLoading && blendedMovies && blendedMovies.length === 0 && (
+              <ThemedText type="default" style={styles.sectionBody}>No blended results available.</ThemedText>
+            )}
+
+            {!blendLoading && blendedMovies && blendedMovies.length > 0 && (
+              <FlatList
+                data={blendedMovies}
+                keyExtractor={(m: any) => String(m.id || m.movie_id || m.title)}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={styles.movieCard}
+                    onPress={() => Alert.alert(item.title || item.name || 'Movie')}
+                  >
+                            {(() => {
+                              const posterPath = item.poster_path || item.poster || item.image || null;
+                              const posterUrl = posterPath
+                                ? `https://image.tmdb.org/t/p/w500${posterPath}`
+                                : 'https://via.placeholder.com/300x450.png?text=No+Image';
+                              return <Image source={{ uri: posterUrl }} style={styles.moviePoster} contentFit="cover" />;
+                            })()}
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <ThemedText type="defaultSemiBold" style={styles.movieTitle}>{item.title || item.name}</ThemedText>
+                      <ThemedText type="default" style={styles.movieSim}>{Math.round(Math.max(0, Math.min(1, (item.similarity || 0))) * 100)}% match</ThemedText>
+                    </View>
+                  </Pressable>
+                )}
+              />
+            )}
           </View>
         )}
-      </ScrollView>
+      </View>
     </ThemedView>
   );
 }
@@ -315,6 +491,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255, 160, 255, 0.45)',
     marginBottom: 10,
+    position: 'relative',
   },
   userAvatarImage: {
     width: 52,
@@ -326,6 +503,12 @@ const styles = StyleSheet.create({
   },
   userMeta: {
     flex: 1,
+  },
+  userContentPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingRight: 110,
   },
   userName: {
     fontSize: 13,
@@ -345,5 +528,136 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     backgroundColor: 'rgba(255, 255, 255, 0.12)',
     marginVertical: 4,
+  },
+  startBlendButton: {
+    position: 'absolute',
+    right: 20,
+    top: '50%',
+    transform: [{ translateY: -20 }],
+    borderRadius: 999,
+    overflow: 'hidden',
+    minWidth: 96,
+    height: 34,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    zIndex: 100,
+    elevation: 8,
+    // subtle shadow so it pops on dark background
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+  },
+  startBlendButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  startBlendPressable: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    gap: 8,
+  },
+  selectedList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 8,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+  },
+  chipAvatar: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    marginRight: 8,
+  },
+  chipText: {
+    fontSize: 12,
+    maxWidth: 100,
+  },
+  selectionActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 8,
+  },
+  clearButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  clearButtonText: {
+    fontSize: 13,
+    color: 'rgba(228,206,255,0.9)'
+  },
+  computeButton: {
+    borderRadius: 999,
+    overflow: 'hidden',
+    minWidth: 110,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  computePressable: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  computeButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  resultsHeader: {
+    marginTop: 6,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  resultsActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  movieCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(17, 4, 33, 0.9)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 160, 255, 0.08)',
+    marginBottom: 10,
+  },
+  moviePoster: {
+    width: 64,
+    height: 96,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.03)'
+  },
+  movieTitle: {
+    fontSize: 14,
+    color: '#FFFFFF',
+    marginBottom: 4,
+  },
+  movieSim: {
+    fontSize: 12,
+    color: 'rgba(228,206,255,0.75)'
   },
 });
