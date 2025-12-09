@@ -1,12 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   TextInput,
   View,
   Alert,
+  Dimensions,
+  Modal,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -24,14 +27,21 @@ export default function BlendScreen() {
   const { user, supabase } = useAuth();
   const router = useRouter();
 
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [searching, setSearching] = React.useState(false);
-  const [searchError, setSearchError] = React.useState<string | null>(null);
-  const [results, setResults] = React.useState<any[]>([]);
-  const [selectedUsers, setSelectedUsers] = React.useState<any[]>([]);
-  const [viewMode, setViewMode] = React.useState<'search' | 'results'>('search');
-  const [blendedMovies, setBlendedMovies] = React.useState<any[] | null>(null);
-  const [blendLoading, setBlendLoading] = React.useState(false);
+  // Search and user selection
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [results, setResults] = useState<any[]>([]);
+  const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
+
+  // Blend computation and results
+  const [viewMode, setViewMode] = useState<'search' | 'results'>('search');
+  const [blendedTopPicks, setBlendedTopPicks] = useState<any[] | null>(null);
+  const [blendedCategories, setBlendedCategories] = useState<Record<string, any[]> | null>(null);
+  const [blendLoading, setBlendLoading] = useState(false);
+
+  // Movie detail modal
+  const [selectedMovie, setSelectedMovie] = useState<any | null>(null);
 
   const searchTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -76,7 +86,6 @@ export default function BlendScreen() {
 
     const trimmed = searchQuery.trim();
 
-    // Clear results when query is empty
     if (!trimmed) {
       setResults([]);
       setSearchError(null);
@@ -87,7 +96,6 @@ export default function BlendScreen() {
       return;
     }
 
-    // Debounce the actual search call
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
@@ -102,15 +110,14 @@ export default function BlendScreen() {
         searchTimeoutRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, supabase]);
 
   const handlePressUser = (otherUserId: string) => {
-    // Navigate to a separate user profile route, e.g. /user/[id]
     router.push(`/user/${otherUserId}`);
   };
 
   const handleStartBlend = (otherUser: any) => {
-    // Toggle selecting a user for the blend
     if (!otherUser || !otherUser.id) return;
     setSelectedUsers((prev) => {
       const exists = prev.find((p) => p.id === otherUser.id);
@@ -121,7 +128,8 @@ export default function BlendScreen() {
 
   const clearSelection = () => {
     setSelectedUsers([]);
-    setBlendedMovies(null);
+    setBlendedTopPicks(null);
+    setBlendedCategories(null);
     setViewMode('search');
   };
 
@@ -134,7 +142,7 @@ export default function BlendScreen() {
     const participantIds = [String(user.id), ...selectedUsers.map((s) => String(s.id))];
     setBlendLoading(true);
     try {
-      // fetch all preference vectors via backend (service key) to avoid RLS
+      // Fetch all preference vectors
       let prefById: Record<string, number[]> = {};
       try {
         const prefsRes = await fetch(`${API_BASE_URL}/v1/preferences/batch`, {
@@ -155,9 +163,6 @@ export default function BlendScreen() {
             prefById[String(p.user_id)] = vec;
           }
         });
-        console.log('[Blend] Loaded preferences (backend) for', Object.keys(prefById).length, 'participants:', Object.keys(prefById));
-        console.log('[Blend] Participant IDs requested:', participantIds);
-        console.log('[Blend] Raw prefs data (backend):', prefs);
       } catch (err) {
         console.warn('[Blend] backend prefs batch failed, falling back to Supabase client', err);
         const { data: prefs, error: prefsError } = await supabase
@@ -178,11 +183,9 @@ export default function BlendScreen() {
             prefById[String(p.user_id)] = vec;
           }
         });
-        console.log('[Blend] Loaded preferences (client) for', Object.keys(prefById).length, 'participants:', Object.keys(prefById));
-        console.log('[Blend] Raw prefs data (client):', prefs);
       }
 
-      // Check for missing or invalid preferences
+      // Check for missing preferences
       const missingPrefs = participantIds.filter(pid => {
         const vec = prefById[String(pid)];
         return !vec || !Array.isArray(vec) || vec.length === 0;
@@ -203,58 +206,89 @@ export default function BlendScreen() {
         return;
       }
 
-      // load movie vibes joined with movies
-      const { data: movieVibes } = await supabase
-        .from('movie_vibes')
-        .select('movie_id, vibe_vector, movie:movies(*)')
-        .limit(600);
-
-      console.log('[Blend] Loaded', (movieVibes || []).length, 'movies with vibes');
-
-      const vrows = (movieVibes || []).map((mv: any) => {
-        const movie = mv.movie || {};
-        const vibe = mv.vibe_vector || null;
-        
-        if (!vibe) {
-          return { ...movie, similarity: 0 };
-        }
-
-        // compute avg cosine across participants
-        const similarities: number[] = [];
-        participantIds.forEach((pid) => {
-          const vec = prefById[String(pid)] || null;
-          if (vec && vibe) {
-            // cosine
-            const dot = vec.reduce((s: number, v: number, i: number) => s + (v || 0) * (vibe[i] || 0), 0);
-            const normA = Math.sqrt(vec.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
-            const normB = Math.sqrt(vibe.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
-            const cos = normA === 0 || normB === 0 ? 0 : dot / (normA * normB);
-            similarities.push(cos);
-          }
-        });
-
-        const blended = similarities.length > 0 
-          ? similarities.reduce((sum, s) => sum + s, 0) / similarities.length 
-          : 0;
-
-        return { ...movie, similarity: blended };
+      // Call backend to get blend recommendations
+      const blendRes = await fetch(`${API_BASE_URL}/v1/blend/recommendations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          preference_vectors: prefById,
+          max_movies: 600 
+        }),
       });
 
-      vrows.sort((a: any, b: any) => (b.similarity || 0) - (a.similarity || 0));
-      
-      console.log('[Blend] Top 5 blended movies:', vrows.slice(0, 5).map(m => ({ 
-        title: m.title, 
-        similarity: m.similarity 
-      })));
+      if (!blendRes.ok) {
+        const txt = await blendRes.text();
+        console.error('[Blend] recommendations endpoint failed', txt);
+        Alert.alert('Error', 'Failed to compute blend recommendations. Please try again.');
+        setBlendLoading(false);
+        return;
+      }
 
-      setBlendedMovies(vrows);
+      const blendJson = await blendRes.json();
+      const topPicks = blendJson?.top_picks || [];
+      const categories = blendJson?.categories || {};
+
+      setBlendedTopPicks(topPicks);
+      setBlendedCategories(categories);
       setViewMode('results');
     } catch (e) {
       console.error('Error computing blended movies', e);
-      setBlendedMovies([]);
+      setBlendedTopPicks([]);
+      setBlendedCategories({});
     } finally {
       setBlendLoading(false);
     }
+  };
+
+  const renderRailCard = (movie: any) => {
+    const title: string = movie.title || '';
+    const releaseDate: string | null = movie.release_date || null;
+    const year = releaseDate ? releaseDate.slice(0, 4) : '';
+    const posterPath: string | null = movie.poster_path || null;
+    const similarity: number | null =
+      typeof movie.blend_score === 'number' ? movie.blend_score : null;
+
+    const matchPercent =
+      similarity !== null ? Math.round(Math.max(0, Math.min(1, similarity)) * 100) : null;
+
+    const posterUrl = posterPath
+      ? `https://image.tmdb.org/t/p/w500${posterPath}`
+      : 'https://via.placeholder.com/300x450.png?text=No+Image';
+
+    return (
+      <Pressable
+        key={movie.id}
+        style={styles.railCard}
+        onPress={() => setSelectedMovie(movie)}
+      >
+        <View style={styles.railPosterWrapper}>
+          <Image source={{ uri: posterUrl }} style={styles.railPoster} contentFit="cover" />
+        </View>
+        <View style={styles.railCardBody}>
+          <ThemedText
+            numberOfLines={1}
+            type="defaultSemiBold"
+            style={styles.railCardTitle}
+          >
+            {title}
+          </ThemedText>
+          <View style={styles.railMetaRow}>
+            {year ? (
+              <ThemedText type="default" style={styles.railCardMeta}>
+                {year}
+              </ThemedText>
+            ) : null}
+            {matchPercent !== null ? (
+              <View style={styles.matchBadge}>
+                <ThemedText type="defaultSemiBold" style={styles.matchBadgeText}>
+                  {matchPercent}% match
+                </ThemedText>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </Pressable>
+    );
   };
 
   const renderUserItem = ({ item }: { item: any }) => {
@@ -270,7 +304,6 @@ export default function BlendScreen() {
         ? `${watchlistCount} in watchlist · Tap to view`
         : 'Tap to view profile';
 
-    // Build avatar URI from avatar_url, supporting both full URLs and storage paths
     let avatarUri: string | undefined;
     if (item.avatar_url) {
       if (typeof item.avatar_url === 'string' && item.avatar_url.startsWith('http')) {
@@ -290,7 +323,6 @@ export default function BlendScreen() {
     }
 
     if (!avatarUri) {
-      // Soft, pretty fallback avatar
       avatarUri =
         'https://api.dicebear.com/8.x/thumbs/svg?seed=' +
         encodeURIComponent(name || 'user');
@@ -334,9 +366,13 @@ export default function BlendScreen() {
 
   return (
     <ThemedView style={styles.screen}>
-      <View style={styles.content}>
-        {viewMode === 'search' && (
-          <>
+      {viewMode === 'search' && (
+        <View style={{ flex: 1 }}>
+          <ScrollView
+            contentContainerStyle={styles.content}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
             {/* Header */}
             <View style={styles.header}>
               <ThemedText type="title" style={styles.title}>
@@ -366,7 +402,10 @@ export default function BlendScreen() {
                 <View style={styles.selectedList}>
                   {selectedUsers.map((s) => (
                     <View key={s.id} style={styles.chip}>
-                      <Image source={{ uri: s.avatar_url || `https://api.dicebear.com/8.x/thumbs/svg?seed=${encodeURIComponent(s.display_name || 'user')}` }} style={styles.chipAvatar} />
+                      <Image 
+                        source={{ uri: s.avatar_url || `https://api.dicebear.com/8.x/thumbs/svg?seed=${encodeURIComponent(s.display_name || 'user')}` }} 
+                        style={styles.chipAvatar} 
+                      />
                       <ThemedText type="default" style={styles.chipText} numberOfLines={1}>
                         {s.display_name || 'User'}
                       </ThemedText>
@@ -380,7 +419,7 @@ export default function BlendScreen() {
                       Clear
                     </ThemedText>
                   </Pressable>
-                  <LinearGradient colors={[ '#ff4ac7', '#ff2db0' ]} start={[0,0]} end={[1,1]} style={styles.computeButton}>
+                  <LinearGradient colors={['#ff4ac7', '#ff2db0']} start={[0, 0]} end={[1, 1]} style={styles.computeButton}>
                     <Pressable onPress={computeBlended} style={styles.computePressable}>
                       {blendLoading ? (
                         <ActivityIndicator color="#fff" />
@@ -425,64 +464,257 @@ export default function BlendScreen() {
                 />
               </View>
             )}
-          </>
-        )}
+          </ScrollView>
+        </View>
+      )}
 
-        {viewMode === 'results' && (
-          <View>
-            <View style={styles.resultsHeader}>
-              <ThemedText type="subtitle" style={styles.sectionTitle}>
-                Blend with { [((user as any)?.display_name || (user as any)?.email), ...selectedUsers.map((s: any) => s.display_name)].filter(Boolean).join(', ') }
-              </ThemedText>
-              <View style={styles.resultsActions}>
-                <Pressable style={styles.clearButton} onPress={() => setViewMode('search') }>
-                  <ThemedText type="default" style={styles.clearButtonText}>Adjust selection</ThemedText>
-                </Pressable>
-                <Pressable style={styles.clearButton} onPress={clearSelection}>
-                  <ThemedText type="default" style={styles.clearButtonText}>Clear</ThemedText>
-                </Pressable>
-              </View>
+      {viewMode === 'results' && (
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.resultsContent}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.resultsHeader}>
+            <ThemedText type="subtitle" style={styles.sectionTitle}>
+              Blend with {[((user as any)?.display_name || (user as any)?.email), ...selectedUsers.map((s: any) => s.display_name)].filter(Boolean).join(', ')}
+            </ThemedText>
+            <View style={styles.resultsActions}>
+              <Pressable style={styles.clearButton} onPress={() => setViewMode('search')}>
+                <ThemedText type="default" style={styles.clearButtonText}>Adjust selection</ThemedText>
+              </Pressable>
+              <Pressable style={styles.clearButton} onPress={clearSelection}>
+                <ThemedText type="default" style={styles.clearButtonText}>Clear</ThemedText>
+              </Pressable>
             </View>
-
-            {/* Blended movie list */}
-            {blendLoading && (
-              <View style={{ marginTop: 12 }}>
-                <ActivityIndicator />
-              </View>
-            )}
-
-            {!blendLoading && blendedMovies && blendedMovies.length === 0 && (
-              <ThemedText type="default" style={styles.sectionBody}>No blended results available.</ThemedText>
-            )}
-
-            {!blendLoading && blendedMovies && blendedMovies.length > 0 && (
-              <FlatList
-                data={blendedMovies}
-                keyExtractor={(m: any) => String(m.id || m.movie_id || m.title)}
-                renderItem={({ item }) => (
-                  <Pressable
-                    style={styles.movieCard}
-                    onPress={() => Alert.alert(item.title || item.name || 'Movie')}
-                  >
-                            {(() => {
-                              const posterPath = item.poster_path || item.poster || item.image || null;
-                              const posterUrl = posterPath
-                                ? `https://image.tmdb.org/t/p/w500${posterPath}`
-                                : 'https://via.placeholder.com/300x450.png?text=No+Image';
-                              return <Image source={{ uri: posterUrl }} style={styles.moviePoster} contentFit="cover" />;
-                            })()}
-                    <View style={{ flex: 1, marginLeft: 12 }}>
-                      <ThemedText type="defaultSemiBold" style={styles.movieTitle}>{item.title || item.name}</ThemedText>
-                      <ThemedText type="default" style={styles.movieSim}>{Math.round(Math.max(0, Math.min(1, (item.similarity || 0))) * 100)}% match</ThemedText>
-                    </View>
-                  </Pressable>
-                )}
-              />
-            )}
           </View>
-        )}
-      </View>
+
+          {blendLoading && (
+            <View style={{ marginTop: 24, alignItems: 'center' }}>
+              <ActivityIndicator />
+              <ThemedText type="default" style={{ marginTop: 8, color: 'rgba(228, 206, 255, 0.85)' }}>Computing your blend...</ThemedText>
+            </View>
+          )}
+
+          {!blendLoading && blendedTopPicks && blendedTopPicks.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <ThemedText type="title" style={styles.sectionTitle}>Top picks for you</ThemedText>
+              </View>
+              <FlatList
+                data={blendedTopPicks}
+                keyExtractor={(m: any) => String(m.id)}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.railListContent}
+                scrollEnabled={true}
+                renderItem={({ item }) => renderRailCard(item)}
+              />
+            </View>
+          )}
+
+          {!blendLoading && blendedCategories && Object.keys(blendedCategories).length > 0 && (
+            <>
+              {Object.entries(blendedCategories).map(([category, movies]: [string, any[]]) => (
+                <View key={category} style={styles.section}>
+                  <View style={styles.sectionHeader}>
+                    <ThemedText type="title" style={styles.sectionTitle}>
+                      Best {category} Blend
+                    </ThemedText>
+                  </View>
+                  <FlatList
+                    data={movies}
+                    keyExtractor={(m: any) => String(m.id)}
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.railListContent}
+                    scrollEnabled={true}
+                    renderItem={({ item }) => renderRailCard(item)}
+                  />
+                </View>
+              ))}
+            </>
+          )}
+        </ScrollView>
+      )}
+
+      {selectedMovie && (
+        <MovieDetailsModal
+          movie={selectedMovie}
+          onClose={() => setSelectedMovie(null)}
+        />
+      )}
     </ThemedView>
+  );
+}
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+function MovieDetailsModal({
+  movie,
+  onClose,
+}: {
+  movie: any;
+  onClose: () => void;
+}) {
+  const { user, supabase } = useAuth();
+
+  const [loading, setLoading] = useState(true);
+  const [movieRow, setMovieRow] = useState<any | null>(null);
+  const [showReview, setShowReview] = useState(false);
+  const [rating, setRating] = useState<number>(0);
+  const [reaction, setReaction] = useState<'like' | 'meh' | 'dislike' | null>(null);
+  const [reviewText, setReviewText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  React.useEffect(() => {
+    if (!movie || !user) return;
+
+    const loadDetails = async () => {
+      setLoading(true);
+      try {
+        const { data: movieData } = await supabase
+          .from('movies')
+          .select('*')
+          .eq('id', movie.id)
+          .maybeSingle();
+
+        setMovieRow(movieData || movie);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadDetails();
+  }, [movie, user, supabase]);
+
+  const handleSubmitReview = async () => {
+    if (!user || !movieRow) return;
+    setSubmitting(true);
+    try {
+      const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+      if (!API_BASE_URL) {
+        Alert.alert('Error', 'API base URL not configured.');
+        return;
+      }
+
+      const res = await fetch(`${API_BASE_URL}/v1/movies/${movieRow.id}/watch-and-react`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: user.id,
+          rating,
+          reaction,
+          review: reviewText,
+        }),
+      });
+
+      if (!res.ok) {
+        Alert.alert('Error', 'Failed to save your reaction.');
+        return;
+      }
+
+      Alert.alert('Success', 'Your reaction has been saved!');
+      setShowReview(false);
+      setRating(0);
+      setReaction(null);
+      setReviewText('');
+    } catch (e) {
+      console.error('Error submitting review', e);
+      Alert.alert('Error', 'Failed to save your reaction.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal visible={true} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <Pressable style={styles.modalContent} onPress={() => {}}>
+          {loading ? (
+            <ActivityIndicator />
+          ) : (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <ThemedText type="defaultSemiBold" style={styles.modalTitle}>
+                {movieRow?.title || movie?.title}
+              </ThemedText>
+              {movieRow?.poster_path && (
+                <Image
+                  source={{ uri: `https://image.tmdb.org/t/p/w500${movieRow.poster_path}` }}
+                  style={styles.modalPoster}
+                  contentFit="cover"
+                />
+              )}
+              <Pressable
+                style={styles.watchButton}
+                onPress={() => setShowReview(!showReview)}
+              >
+                <ThemedText style={styles.watchButtonText}>Just Watched</ThemedText>
+              </Pressable>
+
+              {showReview && (
+                <View style={styles.reviewContainer}>
+                  <ThemedText style={styles.reviewLabel}>How was it?</ThemedText>
+                  <View style={styles.ratingRow}>
+                    {[1, 2, 3, 4, 5].map((r) => (
+                      <Pressable
+                        key={r}
+                        onPress={() => setRating(r)}
+                        style={[
+                          styles.starButton,
+                          rating >= r && styles.starButtonActive,
+                        ]}
+                      >
+                        <ThemedText style={styles.star}>★</ThemedText>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <View style={styles.reactionRow}>
+                    {(['like', 'meh', 'dislike'] as const).map((reac) => (
+                      <Pressable
+                        key={reac}
+                        onPress={() => setReaction(reac)}
+                        style={[
+                          styles.reactionButton,
+                          reaction === reac && styles.reactionButtonActive,
+                        ]}
+                      >
+                        <ThemedText style={styles.reactionText}>
+                          {reac === 'like' ? '👍' : reac === 'meh' ? '😐' : '👎'}
+                        </ThemedText>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <TextInput
+                    placeholder="Add a review (optional)"
+                    value={reviewText}
+                    onChangeText={setReviewText}
+                    multiline
+                    style={styles.reviewInput}
+                    placeholderTextColor="rgba(228, 206, 255, 0.5)"
+                  />
+
+                  <Pressable
+                    style={styles.submitButton}
+                    onPress={handleSubmitReview}
+                    disabled={submitting}
+                  >
+                    <ThemedText style={styles.submitButtonText}>
+                      {submitting ? 'Saving...' : 'Save'}
+                    </ThemedText>
+                  </Pressable>
+                </View>
+              )}
+
+              <Pressable style={styles.closeButton} onPress={onClose}>
+                <ThemedText style={styles.closeButtonText}>Close</ThemedText>
+              </Pressable>
+            </ScrollView>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -493,6 +725,11 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingTop: 72,
+    paddingBottom: 32,
+    paddingHorizontal: 20,
+  },
+  resultsContent: {
+    paddingTop: 80,
     paddingBottom: 32,
     paddingHorizontal: 20,
   },
@@ -536,11 +773,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: 'rgba(228, 206, 255, 0.85)',
   },
-  userHint: {
-    marginTop: 6,
-    fontSize: 11,
-    color: 'rgba(228, 206, 255, 0.7)',
-  },
   searchResultsWrapper: {
     marginTop: 18,
     marginBottom: 4,
@@ -553,6 +785,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(17, 4, 33, 0.95)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255, 160, 255, 0.45)',
+  },
+  sectionHeader: {
+    marginBottom: 12,
   },
   sectionTitle: {
     fontSize: 15,
@@ -606,11 +841,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: 'rgba(255, 255, 255, 0.9)',
   },
-  userDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    marginVertical: 4,
-  },
   startBlendButton: {
     position: 'absolute',
     right: 20,
@@ -625,7 +855,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     zIndex: 100,
     elevation: 8,
-    // subtle shadow so it pops on dark background
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.25,
@@ -690,7 +919,7 @@ const styles = StyleSheet.create({
   },
   clearButtonText: {
     fontSize: 13,
-    color: 'rgba(228,206,255,0.9)'
+    color: 'rgba(228,206,255,0.9)',
   },
   computeButton: {
     borderRadius: 999,
@@ -709,40 +938,162 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   resultsHeader: {
-    marginTop: 6,
-    marginBottom: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    marginBottom: 12,
+    paddingHorizontal: 6,
   },
   resultsActions: {
     flexDirection: 'row',
     gap: 8,
+    marginTop: 8,
   },
-  movieCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  railCard: {
+    marginRight: 14,
+    width: 120,
+  },
+  railPosterWrapper: {
+    marginBottom: 8,
     borderRadius: 12,
-    backgroundColor: 'rgba(17, 4, 33, 0.9)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 160, 255, 0.08)',
-    marginBottom: 10,
+    overflow: 'hidden',
   },
-  moviePoster: {
-    width: 64,
-    height: 96,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.03)'
+  railPoster: {
+    width: 120,
+    height: 180,
   },
-  movieTitle: {
-    fontSize: 14,
+  railCardBody: {
+    flex: 1,
+  },
+  railCardTitle: {
+    fontSize: 12,
     color: '#FFFFFF',
     marginBottom: 4,
   },
-  movieSim: {
-    fontSize: 12,
-    color: 'rgba(228,206,255,0.75)'
+  railMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  railCardMeta: {
+    fontSize: 10,
+    color: 'rgba(228, 206, 255, 0.7)',
+  },
+  matchBadge: {
+    backgroundColor: 'rgba(255, 74, 199, 0.2)',
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 999,
+  },
+  matchBadgeText: {
+    fontSize: 9,
+    color: '#ff4ac7',
+  },
+  railListContent: {
+    paddingRight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '85%',
+    maxHeight: SCREEN_HEIGHT * 0.8,
+    backgroundColor: '#180930',
+    borderRadius: 16,
+    padding: 20,
+  },
+  modalTitle: {
+    fontSize: 18,
+    color: '#FFFFFF',
+    marginBottom: 12,
+  },
+  modalPoster: {
+    width: '100%',
+    height: 240,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  watchButton: {
+    backgroundColor: '#ff4ac7',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  watchButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  reviewContainer: {
+    marginTop: 12,
+  },
+  reviewLabel: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  ratingRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  starButton: {
+    padding: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 8,
+  },
+  starButtonActive: {
+    backgroundColor: '#ff4ac7',
+  },
+  star: {
+    fontSize: 20,
+    color: '#FFFFFF',
+  },
+  reactionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  reactionButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 8,
+    flex: 1,
+    alignItems: 'center',
+  },
+  reactionButtonActive: {
+    backgroundColor: '#ff4ac7',
+  },
+  reactionText: {
+    fontSize: 18,
+  },
+  reviewInput: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    color: '#FFFFFF',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 12,
+    height: 80,
+  },
+  submitButton: {
+    backgroundColor: '#ff4ac7',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  submitButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  closeButton: {
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  closeButtonText: {
+    color: 'rgba(228, 206, 255, 0.85)',
+    fontSize: 14,
   },
 });

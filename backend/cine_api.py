@@ -10,8 +10,16 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 import math
 from datetime import datetime
+import logging
 
 load_dotenv()
+
+# Set up file logging
+logging.basicConfig(
+    filename='/tmp/cine_api_debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -54,12 +62,6 @@ class PreferencesPayload(BaseModel):
 
 class PreferencesBatchPayload(BaseModel):
     user_ids: List[str]
-
-
-class BlendedRecommendationsPayload(BaseModel):
-    user_ids: List[str]
-    genres: Optional[List[str]] = None
-    limit: int = 20
 
 
 # --- Watch and React payload model ---
@@ -713,6 +715,145 @@ def save_user_preferences(payload: PreferencesPayload):
         # Re-raise any explicit HTTPException
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class BlendRecommendationsPayload(BaseModel):
+    preference_vectors: dict  # { user_id: [float, float, ...] }
+    max_movies: int = 600  # max movies to compute blend scores for
+
+
+@app.post("/v1/blend/recommendations")
+def get_blend_recommendations(payload: BlendRecommendationsPayload):
+    """
+    Get categorized movie recommendations for a blend of users.
+
+    Body:
+    - preference_vectors: dict mapping user_id to preference vector
+    - max_movies: max movies to evaluate (default 600)
+
+    Returns:
+    - top_picks: list of top 10 blend-scored movies
+    - categories: dict { category_name: [ { movie }, { movie }, ... ] }
+      where each category has ~20 movies sorted by blend score
+    """
+    # TMDB genre ID to name mapping
+    GENRE_NAMES = {
+        12: "Adventure",
+        14: "Fantasy",
+        16: "Animation",
+        18: "Drama",
+        27: "Horror",
+        28: "Action",
+        35: "Comedy",
+        36: "History",
+        37: "Western",
+        53: "Thriller",
+        80: "Crime",
+        99: "Documentary",
+        878: "Science Fiction",
+        9648: "Mystery",
+        10402: "Music",
+        10749: "Romance",
+        10751: "Family",
+        10752: "War",
+        10770: "TV Movie",
+    }
+    
+    try:
+        if not payload.preference_vectors:
+            return {"top_picks": [], "categories": {}}
+
+        # Fetch movie vibes + movies
+        mvs_res = (
+            supabase.table("movie_vibes")
+            .select("movie_id, vibe_vector, movie:movies(*)")
+            .limit(payload.max_movies)
+            .execute()
+        )
+
+        movies_with_vibes = mvs_res.data or []
+
+        # Compute blend scores for each movie
+        scored_movies = []
+        for mv in movies_with_vibes:
+            movie = mv.get("movie") or {}
+            vibe = mv.get("vibe_vector") or []
+
+            if not vibe:
+                continue
+
+            # Compute avg cosine similarity across all preference vectors
+            similarities = []
+            for pref_vec in payload.preference_vectors.values():
+                if pref_vec and len(pref_vec) == len(vibe):
+                    dot = sum(p * v for p, v in zip(pref_vec, vibe))
+                    mag_p = math.sqrt(sum(p * p for p in pref_vec))
+                    mag_v = math.sqrt(sum(v * v for v in vibe))
+                    if mag_p > 0 and mag_v > 0:
+                        cos = dot / (mag_p * mag_v)
+                        similarities.append(cos)
+
+            blend_score = sum(similarities) / len(similarities) if similarities else 0
+            movie["blend_score"] = blend_score
+            scored_movies.append(movie)
+
+        # Sort by blend score
+        scored_movies.sort(key=lambda m: m.get("blend_score", 0), reverse=True)
+
+        # Top 10
+        top_picks = scored_movies[:10]
+
+        # Group by genre and return top 20 per category
+        categories = {}
+        genre_map = {}
+
+        logging.info(f"Starting genre mapping with {len(scored_movies)} movies")
+        for movie in scored_movies:
+            genres = movie.get("genres") or []
+            logging.debug(f"Movie {movie.get('title', 'unknown')} genres raw: {genres}, type: {type(genres)}")
+            # genres might be a list of IDs (ints) or a comma-separated string
+            if isinstance(genres, str):
+                genres = [int(g.strip()) for g in genres.split(",") if g.strip().isdigit()]
+            elif not isinstance(genres, list):
+                continue
+            
+            for genre_id in genres:
+                logging.debug(f"Processing genre_id: {genre_id}, type: {type(genre_id)}")
+                # Ensure genre_id is an int
+                if isinstance(genre_id, str):
+                    try:
+                        genre_id = int(genre_id)
+                    except ValueError:
+                        continue
+                elif not isinstance(genre_id, int):
+                    continue
+                
+                # Map ID to readable name
+                genre_name = GENRE_NAMES.get(genre_id, f"Genre {genre_id}")
+                logging.debug(f"Mapped genre_id {genre_id} to genre_name '{genre_name}'")
+                
+                if genre_name not in genre_map:
+                    genre_map[genre_name] = []
+                if len(genre_map[genre_name]) < 20:
+                    genre_map[genre_name].append(movie)
+
+        # Convert to response format
+        for genre, movies in genre_map.items():
+            categories[genre] = movies
+
+        # Debug output
+        logging.info(f"genre_map keys: {list(genre_map.keys())}")
+        logging.info(f"categories keys: {list(categories.keys())}")
+        logging.info(f"categories type: {type(categories)}")
+
+        return {
+            "top_picks": top_picks,
+            "categories": categories,
+        }
+
+    except Exception as e:
+        print(f"Error computing blend recommendations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
