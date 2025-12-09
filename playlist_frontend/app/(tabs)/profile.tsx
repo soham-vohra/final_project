@@ -9,6 +9,9 @@ import {
   Pressable,
   Modal,
   TouchableOpacity,
+  Alert,
+  TextInput,
+  Dimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -177,6 +180,7 @@ export default function ProfileScreen() {
   useFocusEffect(
     React.useCallback(() => {
       loadProfile();
+      loadFollowRequests();
     }, [user])
   );
 
@@ -351,13 +355,24 @@ export default function ProfileScreen() {
   const followBack = async (targetUserId: string) => {
     if (!supabase || !user) return false;
     try {
-      // insert accepted relationship from current user -> target
-      const { error } = await supabase
-        .from('user_relationships')
-        .insert({ user_id: user.id, target_user_id: targetUserId, status: 'accepted' });
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
 
-      if (error) {
-        console.error('Follow back failed', error);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE_URL}/v1/relationships/request`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          user_id: user.id,
+          target_user_id: targetUserId,
+        }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error('Follow back failed', txt);
         return false;
       }
 
@@ -449,7 +464,7 @@ export default function ProfileScreen() {
       : 'https://via.placeholder.com/300x450.png?text=No+Image';
 
     return (
-      <View style={styles.railCard}>
+      <Pressable style={styles.railCard} onPress={() => setSelectedMovie(movie)}>
         <View style={styles.railPosterWrapper}>
           <Image source={{ uri: posterUrl }} style={styles.railPoster} contentFit="cover" />
         </View>
@@ -467,9 +482,11 @@ export default function ProfileScreen() {
             </ThemedText>
           ) : null}
         </View>
-      </View>
+      </Pressable>
     );
   };
+
+  const [selectedMovie, setSelectedMovie] = useState<any | null>(null);
 
   if (isLoading) {
     return (
@@ -485,9 +502,25 @@ export default function ProfileScreen() {
   }
 
   return (
-    <ThemedView style={styles.screen}>
+    <ThemedView style={styles.screen} pointerEvents="box-none">
+      {/* Logout button in top-left */}
+      <TouchableOpacity
+        activeOpacity={0.7}
+        style={styles.logoutButton}
+        onPress={async () => {
+          try {
+            await supabase.auth.signOut();
+          } catch (e) {
+            console.error('Error signing out', e);
+          }
+        }}
+      >
+        <Ionicons name="log-out-outline" size={22} color="#E6B3FF" />
+      </TouchableOpacity>
+
       {/* Bell in top-right */}
       <TouchableOpacity
+        activeOpacity={0.7}
         style={styles.bellButton}
         onPress={async () => {
           setShowRequestsModal(true);
@@ -781,6 +814,14 @@ export default function ProfileScreen() {
         </Modal>
       )}
 
+      {/* Movie details / watch-and-react modal (reused from gallery) */}
+      {selectedMovie && (
+        <MovieDetailsModal
+          movie={selectedMovie}
+          onClose={() => setSelectedMovie(null)}
+        />
+      )}
+
       {/* Followers modal */}
       <Modal transparent animationType="slide" visible={showFollowersModal} onRequestClose={() => setShowFollowersModal(false)}>
         <View style={styles.modalOverlay}>
@@ -794,7 +835,7 @@ export default function ProfileScreen() {
             {listsLoading ? (
               <ActivityIndicator />
             ) : followersList.length === 0 ? (
-              <ThemedText type="default">No followers yet.</ThemedText>
+              <ThemedText type="default" style={{ color: '#FFFFFF' }}>No followers yet.</ThemedText>
             ) : (
               <FlatList
                 data={followersList}
@@ -830,7 +871,7 @@ export default function ProfileScreen() {
             {listsLoading ? (
               <ActivityIndicator />
             ) : followingList.length === 0 ? (
-              <ThemedText type="default">You are not following anyone yet.</ThemedText>
+              <ThemedText type="default" style={{ color: '#FFFFFF' }}>You are not following anyone yet.</ThemedText>
             ) : (
               <FlatList
                 data={followingList}
@@ -866,7 +907,7 @@ export default function ProfileScreen() {
             {requestsLoading ? (
               <ActivityIndicator />
             ) : requestsList.length === 0 ? (
-              <ThemedText type="default">No pending requests.</ThemedText>
+              <ThemedText type="default" style={{ color: '#FFFFFF' }}>No pending requests.</ThemedText>
             ) : (
               <FlatList
                 data={requestsList}
@@ -923,6 +964,405 @@ export default function ProfileScreen() {
     </ThemedView>
   );
 }
+
+function MovieDetailsModal({
+  movie,
+  onClose,
+}: {
+  movie: any;
+  onClose: () => void;
+}) {
+  const { user, supabase } = useAuth();
+
+  const [loading, setLoading] = useState(true);
+  const [movieRow, setMovieRow] = useState<any | null>(null);
+  const [movieVibe, setMovieVibe] = useState<number[] | null>(null);
+  const [userPref, setUserPref] = useState<number[] | null>(null);
+  const [isInWatchlist, setIsInWatchlist] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [addedMessage, setAddedMessage] = useState<string | null>(null);
+
+  const [showReview, setShowReview] = useState(false);
+  const [rating, setRating] = useState<number>(0);
+  const [reaction, setReaction] = useState<'like' | 'meh' | 'dislike' | null>(null);
+  const [reviewText, setReviewText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!movie || !user) return;
+
+    const loadDetails = async () => {
+      setLoading(true);
+      try {
+        const { data: movieData } = await supabase
+          .from('movies')
+          .select('*')
+          .eq('id', movie.id)
+          .maybeSingle();
+
+        const { data: vibeData } = await supabase
+          .from('movie_vibes')
+          .select('vibe_vector')
+          .eq('movie_id', movie.id)
+          .maybeSingle();
+
+        const { data: prefData } = await supabase
+          .from('user_preferences')
+          .select('preference_vector')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('watchlist_movie_ids')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        setMovieRow(movieData || movie);
+        setMovieVibe(vibeData?.vibe_vector || null);
+        setUserPref(prefData?.preference_vector || null);
+
+        const ids = (profileData?.watchlist_movie_ids || []).map(Number);
+        setIsInWatchlist(ids.includes(Number(movie.id)));
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadDetails();
+  }, [movie, user]);
+
+  const addToWatchlist = async () => {
+    if (!user || saving) return;
+    setSaving(true);
+    setAddedMessage(null);
+
+    try {
+      const { data: profileData, error } = await supabase
+        .from('profiles')
+        .select('watchlist_movie_ids')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Error loading profile for watchlist update', error);
+        return;
+      }
+
+      const current = (profileData?.watchlist_movie_ids || []).map(Number);
+      const updated = Array.from(new Set([...current, Number(movie.id)]));
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ watchlist_movie_ids: updated })
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('Error updating watchlist', updateError);
+        return;
+      }
+
+      setIsInWatchlist(true);
+      setAddedMessage('Added to your watchlist');
+    } catch (e) {
+      console.error('Unexpected error adding to watchlist', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSubmitReview = async () => {
+    if (!user || !API_BASE_URL) return;
+    if (!rating || !reaction) return;
+
+    setSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      const payload = {
+        user_id: user.id,
+        rating,
+        reaction,
+        review: reviewText || null,
+        watched_at: new Date().toISOString(),
+      };
+
+      const res = await fetch(`${API_BASE_URL}/v1/movies/${movie.id}/watch-and-react`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        console.error('watch-and-react failed', txt);
+        setSubmitError('Something went wrong saving your review. Please try again.');
+        return;
+      }
+
+      await res.json();
+
+      setAddedMessage('Logged to your history');
+      setShowReview(false);
+      Alert.alert('Saved', 'Your rating and review have been logged.');
+    } catch (e) {
+      console.error('Error submitting review', e);
+      setSubmitError('Network error. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const vibePills = React.useMemo(() => {
+    if (!movieVibe) return [];
+    const v = movieVibe;
+    const pills: string[] = [];
+
+    const add = (val: number, pos: string, neg: string, t = 0.35) => {
+      if (val > t) pills.push(pos);
+      else if (val < -t) pills.push(neg);
+    };
+
+    add(v[0], 'Arthouse', 'Mainstream');
+    add(v[1], 'Dark Tone', 'Light Tone');
+    add(v[2], 'Slow Burn', 'Fast Paced');
+    add(v[6], 'Fantastical', 'Grounded');
+    add(v[9], 'Comfort Watch', 'Challenging');
+
+    return pills.slice(0, 4);
+  }, [movieVibe]);
+
+  const whyThisText = React.useMemo(() => {
+    if (!movieVibe || !userPref) return null;
+
+    const axes = [
+      { i: 0, pos: 'artsy films', neg: 'mainstream hits' },
+      { i: 1, pos: 'dark tones', neg: 'lighter moods' },
+      { i: 2, pos: 'slow-burn pacing', neg: 'fast energy' },
+      { i: 6, pos: 'fantastical worlds', neg: 'grounded stories' },
+      { i: 9, pos: 'comfort films', neg: 'challenging cinema' },
+    ];
+
+    const scores = axes.map(a => ({
+      ...a,
+      score: (userPref[a.i] || 0) * (movieVibe[a.i] || 0),
+    }));
+
+    const top = scores
+      .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+      .slice(0, 2);
+
+    if (!top.length) return null;
+
+    return `Because you tend to enjoy ${top
+      .map(t => (t.score > 0 ? t.pos : t.neg))
+      .join(' and ')}, this movie aligns strongly with your taste.`;
+  }, [movieVibe, userPref]);
+
+  return (
+    <Modal transparent animationType="fade" visible>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <Pressable
+          style={[styles.modalContainer, { maxHeight: SCREEN_HEIGHT * 0.9 }]}
+          onPress={(e) => e.stopPropagation()}
+        >
+          {loading ? (
+            <ActivityIndicator />
+          ) : (
+            <>
+              <Pressable style={styles.modalClose} onPress={onClose}>
+                <ThemedText style={{ color: '#fff' }}>✕</ThemedText>
+              </Pressable>
+
+              <Image
+                source={{
+                  uri: movie.poster_path
+                    ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+                    : undefined,
+                }}
+                style={styles.modalPoster}
+                contentFit="cover"
+              />
+
+              {showReview ? (
+                <>
+                  <ThemedText style={styles.modalTitle}>How was it?</ThemedText>
+
+                  <ThemedText style={styles.reviewLabel}>Your rating</ThemedText>
+                  <View style={styles.ratingRow}>
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Pressable
+                        key={star}
+                        onPress={() => setRating(star)}
+                        style={styles.ratingStarWrapper}
+                      >
+                        <ThemedText
+                          style={[
+                            styles.ratingStar,
+                            rating >= star && styles.ratingStarActive,
+                          ]}
+                        >
+                          {rating >= star ? '★' : '☆'}
+                        </ThemedText>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <ThemedText style={styles.reviewLabel}>How did it feel?</ThemedText>
+                  <View style={styles.reactionRow}>
+                    <Pressable
+                      style={[
+                        styles.reactionEmoji,
+                        reaction === 'like' && styles.reactionEmojiSelected,
+                      ]}
+                      onPress={() => setReaction('like')}
+                    >
+                      <ThemedText style={styles.reactionEmojiText}>😊 Like</ThemedText>
+                    </Pressable>
+                    <Pressable
+                      style={[
+                        styles.reactionEmoji,
+                        reaction === 'meh' && styles.reactionEmojiSelected,
+                      ]}
+                      onPress={() => setReaction('meh')}
+                    >
+                      <ThemedText style={styles.reactionEmojiText}>😐 Meh</ThemedText>
+                    </Pressable>
+                    <Pressable
+                      style={[
+                        styles.reactionEmoji,
+                        reaction === 'dislike' && styles.reactionEmojiSelected,
+                      ]}
+                      onPress={() => setReaction('dislike')}
+                    >
+                      <ThemedText style={styles.reactionEmojiText}>☹️ Dislike</ThemedText>
+                    </Pressable>
+                  </View>
+
+                  <ThemedText style={styles.reviewLabel}>Write a quick review (optional)</ThemedText>
+                  <TextInput
+                    style={styles.reviewInput}
+                    placeholder="What did you love or hate?"
+                    placeholderTextColor="rgba(228, 206, 255, 0.6)"
+                    multiline
+                    value={reviewText}
+                    onChangeText={setReviewText}
+                  />
+
+                  {submitError && (
+                    <ThemedText style={styles.submitErrorText}>{submitError}</ThemedText>
+                  )}
+
+                  <Pressable
+                    style={[
+                      styles.submitButton,
+                      (!rating || !reaction || submitting) && styles.submitButtonDisabled,
+                    ]}
+                    disabled={!rating || !reaction || submitting}
+                    onPress={handleSubmitReview}
+                  >
+                    {submitting ? (
+                      <ActivityIndicator />
+                    ) : (
+                      <ThemedText style={styles.submitButtonText}>Submit</ThemedText>
+                    )}
+                  </Pressable>
+
+                  <Pressable
+                    style={styles.backTextButton}
+                    onPress={() => {
+                      setShowReview(false);
+                      setSubmitError(null);
+                    }}
+                  >
+                    <ThemedText style={styles.backTextButtonText}>Back to details</ThemedText>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <View style={styles.modalTitleRow}>
+                    <ThemedText style={styles.modalTitle}>{movieRow?.title}</ThemedText>
+                    {typeof movie.similarity === 'number' && (
+                      <View style={styles.matchPillLarge}>
+                        <ThemedText style={styles.matchPillLargeText}>
+                          {Math.round(Math.max(0, Math.min(1, movie.similarity)) * 100)}% match
+                        </ThemedText>
+                      </View>
+                    )}
+                  </View>
+
+                  <ThemedText style={styles.modalOverview} numberOfLines={6}>
+                    {movieRow?.overview}
+                  </ThemedText>
+
+                  {whyThisText && (
+                    <ThemedText style={styles.whyThisText}>
+                      {whyThisText}
+                    </ThemedText>
+                  )}
+
+                  <View style={styles.modalVibesRow}>
+                    {vibePills.map((pill) => (
+                      <View key={pill} style={styles.vibePill}>
+                        <ThemedText style={styles.vibePillText}>{pill}</ThemedText>
+                      </View>
+                    ))}
+                  </View>
+
+                  <Pressable
+                    style={[
+                      styles.watchlistButton,
+                      (isInWatchlist || saving) && { opacity: 0.7 },
+                    ]}
+                    disabled={isInWatchlist || saving}
+                    onPress={addToWatchlist}
+                  >
+                    {saving ? (
+                      <View style={styles.watchlistButtonContent}>
+                        <ActivityIndicator style={styles.watchlistButtonSpinner} />
+                        <ThemedText style={styles.watchlistButtonText}>
+                          Adding...
+                        </ThemedText>
+                      </View>
+                    ) : (
+                      <ThemedText style={styles.watchlistButtonText}>
+                        {isInWatchlist ? 'In Watchlist' : 'Add to Watchlist'}
+                      </ThemedText>
+                    )}
+                  </Pressable>
+
+                  <Pressable
+                    style={styles.justWatchedButton}
+                    onPress={() => {
+                      setShowReview(true);
+                      setRating(0);
+                      setReaction(null);
+                      setReviewText('');
+                      setSubmitError(null);
+                    }}
+                  >
+                    <ThemedText style={styles.justWatchedButtonText}>Just watched</ThemedText>
+                  </Pressable>
+
+                  {addedMessage && (
+                    <ThemedText style={styles.addedMessageText}>
+                      {addedMessage}
+                    </ThemedText>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const styles = StyleSheet.create({
   screen: {
@@ -1198,6 +1638,18 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 20,
     top: 28,
+    zIndex: 1000,
+    padding: 8,
+  },
+  logoutButton: {
+    marginLeft: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'absolute',
+    left: 20,
+    top: 28,
+    zIndex: 1000,
+    padding: 8,
   },
   notificationBadge: {
     position: 'absolute',
@@ -1251,6 +1703,159 @@ const styles = StyleSheet.create({
   requestActions: {
     flexDirection: 'row',
     gap: 8,
+  },
+  modalContainer: {
+    width: '90%',
+    backgroundColor: '#0B0218',
+    borderRadius: 22,
+    padding: 16,
+  },
+  modalPoster: {
+    width: '100%',
+    height: 260,
+    borderRadius: 16,
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 20,
+    color: '#FFFFFF',
+  },
+  modalOverview: {
+    fontSize: 13,
+    color: 'rgba(228, 206, 255, 0.9)',
+    marginBottom: 8,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  matchPillLarge: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(126, 52, 255, 0.9)',
+  },
+  matchPillLargeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+  },
+  reviewLabel: {
+    fontSize: 13,
+    color: 'rgba(228, 206, 255, 0.9)',
+    marginBottom: 6,
+  },
+  ratingRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  ratingStarWrapper: {
+    paddingHorizontal: 6,
+  },
+  ratingStar: {
+    fontSize: 22,
+    color: 'rgba(120, 90, 160, 0.9)',
+    marginRight: 4,
+  },
+  ratingStarActive: {
+    color: '#FFD76A',
+  },
+  reactionRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  reactionEmoji: {
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginRight: 8,
+    backgroundColor: 'transparent',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.04)',
+  },
+  reactionEmojiSelected: {
+    backgroundColor: 'rgba(58, 10, 105, 0.95)',
+  },
+  reactionEmojiText: {
+    color: '#FFF7FF',
+  },
+  reviewInput: {
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.04)',
+    padding: 10,
+    minHeight: 80,
+    color: '#FFFFFF',
+    marginBottom: 10,
+  },
+  submitErrorText: {
+    color: '#FF8E9E',
+    marginBottom: 8,
+  },
+  submitButton: {
+    backgroundColor: 'rgba(181, 120, 255, 0.95)',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  submitButtonDisabled: {
+    opacity: 0.6,
+  },
+  submitButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  backTextButton: {
+    alignItems: 'center',
+  },
+  backTextButtonText: {
+    color: 'rgba(228, 206, 255, 0.8)',
+  },
+  modalVibesRow: {
+    flexDirection: 'row',
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  whyThisText: {
+    fontSize: 12,
+    color: 'rgba(228, 206, 255, 0.8)',
+    marginBottom: 8,
+  },
+  watchlistButton: {
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+  },
+  watchlistButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  watchlistButtonSpinner: {
+    marginRight: 8,
+  },
+  watchlistButtonText: {
+    color: '#FFFFFF',
+  },
+  justWatchedButton: {
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: 'rgba(181, 120, 255, 0.95)',
+    marginBottom: 8,
+  },
+  justWatchedButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  addedMessageText: {
+    color: 'rgba(228, 206, 255, 0.9)',
+    marginTop: 6,
   },
   actionButton: {
     borderRadius: 8,

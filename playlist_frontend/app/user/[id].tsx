@@ -173,7 +173,7 @@ export default function OtherUserProfileScreen() {
             console.warn('Error loading relationship status', relError);
           } else if (relData?.status === 'accepted') {
             setFollowStatus('following');
-          } else if (relData?.status === 'requested') {
+          } else if (relData?.status === 'pending') {
             setFollowStatus('requested');
           } else {
             setFollowStatus('none');
