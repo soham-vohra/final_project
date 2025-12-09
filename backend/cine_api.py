@@ -52,6 +52,16 @@ class PreferencesPayload(BaseModel):
     preferenceVector: List[float]
 
 
+class PreferencesBatchPayload(BaseModel):
+    user_ids: List[str]
+
+
+class BlendedRecommendationsPayload(BaseModel):
+    user_ids: List[str]
+    genres: Optional[List[str]] = None
+    limit: int = 20
+
+
 # --- Watch and React payload model ---
 
 class WatchAndReactPayload(BaseModel):
@@ -702,6 +712,29 @@ def save_user_preferences(payload: PreferencesPayload):
     except HTTPException:
         # Re-raise any explicit HTTPException
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/preferences/batch")
+def get_user_preferences_batch(payload: PreferencesBatchPayload):
+    """
+    Return preference vectors for a list of user_ids.
+
+    Body:
+    - user_ids: list of UUID strings
+    """
+    if not payload.user_ids:
+        return {"preferences": []}
+
+    try:
+        res = (
+            supabase.table("user_preferences")
+            .select("user_id, preference_vector")
+            .in_("user_id", payload.user_ids)
+            .execute()
+        )
+        return {"preferences": res.data or []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

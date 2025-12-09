@@ -15,6 +15,11 @@ import { ThemedView } from '@/components/themed-view';
 import { useAuth } from '@/providers/AuthProvider';
 import { useRouter } from 'expo-router';
 
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+if (!API_BASE_URL) {
+  console.warn('EXPO_PUBLIC_API_URL is not defined. Blend preferences API will not work.');
+}
+
 export default function BlendScreen() {
   const { user, supabase } = useAuth();
   const router = useRouter();
@@ -122,19 +127,81 @@ export default function BlendScreen() {
 
   const computeBlended = async () => {
     if (!supabase || !user) return;
+    if (!API_BASE_URL) {
+      Alert.alert('Missing API base URL', 'EXPO_PUBLIC_API_URL is not set.');
+      return;
+    }
     const participantIds = [String(user.id), ...selectedUsers.map((s) => String(s.id))];
     setBlendLoading(true);
     try {
-      // load all preference vectors for participants
-      const { data: prefs } = await supabase
-        .from('user_preferences')
-        .select('user_id, preference_vector')
-        .in('user_id', participantIds);
+      // fetch all preference vectors via backend (service key) to avoid RLS
+      let prefById: Record<string, number[]> = {};
+      try {
+        const prefsRes = await fetch(`${API_BASE_URL}/v1/preferences/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_ids: participantIds }),
+        });
 
-      const prefById: Record<string, number[]> = {};
-      (prefs || []).forEach((p: any) => {
-        prefById[String(p.user_id)] = p.preference_vector || null;
+        if (!prefsRes.ok) {
+          throw new Error(`status ${prefsRes.status}: ${await prefsRes.text()}`);
+        }
+
+        const prefsJson = await prefsRes.json();
+        const prefs = prefsJson?.preferences || [];
+        (prefs || []).forEach((p: any) => {
+          const vec = p.preference_vector;
+          if (vec && Array.isArray(vec) && vec.length > 0) {
+            prefById[String(p.user_id)] = vec;
+          }
+        });
+        console.log('[Blend] Loaded preferences (backend) for', Object.keys(prefById).length, 'participants:', Object.keys(prefById));
+        console.log('[Blend] Participant IDs requested:', participantIds);
+        console.log('[Blend] Raw prefs data (backend):', prefs);
+      } catch (err) {
+        console.warn('[Blend] backend prefs batch failed, falling back to Supabase client', err);
+        const { data: prefs, error: prefsError } = await supabase
+          .from('user_preferences')
+          .select('user_id, preference_vector')
+          .in('user_id', participantIds);
+
+        if (prefsError) {
+          console.error('[Blend] Supabase client prefs error:', prefsError);
+          Alert.alert('Error', 'Failed to load user preferences. Please try again.');
+          setBlendLoading(false);
+          return;
+        }
+
+        (prefs || []).forEach((p: any) => {
+          const vec = p.preference_vector;
+          if (vec && Array.isArray(vec) && vec.length > 0) {
+            prefById[String(p.user_id)] = vec;
+          }
+        });
+        console.log('[Blend] Loaded preferences (client) for', Object.keys(prefById).length, 'participants:', Object.keys(prefById));
+        console.log('[Blend] Raw prefs data (client):', prefs);
+      }
+
+      // Check for missing or invalid preferences
+      const missingPrefs = participantIds.filter(pid => {
+        const vec = prefById[String(pid)];
+        return !vec || !Array.isArray(vec) || vec.length === 0;
       });
+      if (missingPrefs.length > 0) {
+        const missingUsers = missingPrefs.map(pid => {
+          if (pid === String(user.id)) return 'You';
+          const u = selectedUsers.find(s => String(s.id) === pid);
+          return u?.display_name || 'Unknown user';
+        }).join(', ');
+        
+        Alert.alert(
+          'Missing Preferences',
+          `${missingUsers} ${missingPrefs.length === 1 ? 'hasn\'t' : 'haven\'t'} rated enough movies yet to generate a preference profile. They need to rate at least a few movies first!`,
+          [{ text: 'OK' }]
+        );
+        setBlendLoading(false);
+        return;
+      }
 
       // load movie vibes joined with movies
       const { data: movieVibes } = await supabase
@@ -142,12 +209,18 @@ export default function BlendScreen() {
         .select('movie_id, vibe_vector, movie:movies(*)')
         .limit(600);
 
+      console.log('[Blend] Loaded', (movieVibes || []).length, 'movies with vibes');
+
       const vrows = (movieVibes || []).map((mv: any) => {
         const movie = mv.movie || {};
         const vibe = mv.vibe_vector || null;
+        
+        if (!vibe) {
+          return { ...movie, similarity: 0 };
+        }
+
         // compute avg cosine across participants
-        let sum = 0;
-        let count = 0;
+        const similarities: number[] = [];
         participantIds.forEach((pid) => {
           const vec = prefById[String(pid)] || null;
           if (vec && vibe) {
@@ -156,15 +229,24 @@ export default function BlendScreen() {
             const normA = Math.sqrt(vec.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
             const normB = Math.sqrt(vibe.reduce((s: number, v: number) => s + (v || 0) * (v || 0), 0));
             const cos = normA === 0 || normB === 0 ? 0 : dot / (normA * normB);
-            sum += cos;
-            count += 1;
+            similarities.push(cos);
           }
         });
-        const blended = count > 0 ? sum / count : 0;
+
+        const blended = similarities.length > 0 
+          ? similarities.reduce((sum, s) => sum + s, 0) / similarities.length 
+          : 0;
+
         return { ...movie, similarity: blended };
       });
 
       vrows.sort((a: any, b: any) => (b.similarity || 0) - (a.similarity || 0));
+      
+      console.log('[Blend] Top 5 blended movies:', vrows.slice(0, 5).map(m => ({ 
+        title: m.title, 
+        similarity: m.similarity 
+      })));
+
       setBlendedMovies(vrows);
       setViewMode('results');
     } catch (e) {
@@ -489,7 +571,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: 'rgba(17, 4, 33, 0.95)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 160, 255, 0.45)',
+    borderColor: '#FFFFFF',
     marginBottom: 10,
     position: 'relative',
   },
@@ -517,12 +599,12 @@ const styles = StyleSheet.create({
   },
   userEmail: {
     fontSize: 11,
-    color: 'rgba(228, 206, 255, 0.9)',
+    color: '#FFFFFF',
     marginBottom: 1,
   },
   userSub: {
     fontSize: 11,
-    color: 'rgba(228, 206, 255, 0.75)',
+    color: 'rgba(255, 255, 255, 0.9)',
   },
   userDivider: {
     height: StyleSheet.hairlineWidth,
@@ -580,6 +662,8 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 8,
     borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
   },
   chipAvatar: {
     width: 26,
@@ -590,6 +674,7 @@ const styles = StyleSheet.create({
   chipText: {
     fontSize: 12,
     maxWidth: 100,
+    color: '#FFFFFF',
   },
   selectionActions: {
     flexDirection: 'row',
