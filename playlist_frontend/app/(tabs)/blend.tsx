@@ -33,6 +33,15 @@ export default function BlendScreen() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<any[]>([]);
   const [selectedUsers, setSelectedUsers] = useState<any[]>([]);
+  const [followingList, setFollowingList] = useState<any[]>([]);
+  const [followingLoading, setFollowingLoading] = useState(false);
+  const [currentProfile, setCurrentProfile] = useState<any | null>(null);
+
+  const followingIds = React.useMemo(() => new Set(followingList.map((u) => u.id)), [followingList]);
+  const filteredResults = React.useMemo(
+    () => results.filter((r) => !followingIds.has(r.id)),
+    [results, followingIds]
+  );
 
   // Blend computation and results
   const [viewMode, setViewMode] = useState<'search' | 'results'>('search');
@@ -112,6 +121,65 @@ export default function BlendScreen() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, supabase]);
+
+  React.useEffect(() => {
+    if (!supabase || !user) return;
+
+    let isMounted = true;
+    const loadCurrentProfile = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('id, display_name, avatar_url, email')
+          .eq('id', user.id)
+          .maybeSingle();
+        if (error) throw error;
+        if (isMounted) setCurrentProfile(data || null);
+      } catch (e) {
+        console.warn('[Blend] Could not load current profile', e);
+        if (isMounted) setCurrentProfile(null);
+      }
+    };
+
+    const loadFollowing = async () => {
+      setFollowingLoading(true);
+      try {
+        const { data: rels, error } = await supabase
+          .from('user_relationships')
+          .select('target_user_id')
+          .eq('user_id', user.id)
+          .eq('status', 'accepted');
+
+        if (error) throw error;
+
+        const ids = (rels || []).map((r: any) => r.target_user_id).filter(Boolean);
+        if (ids.length === 0) {
+          if (isMounted) setFollowingList([]);
+          return;
+        }
+
+        const { data: profs, error: profErr } = await supabase
+          .from('profiles')
+          .select('id, display_name, avatar_url, email, watchlist_movie_ids')
+          .in('id', ids);
+
+        if (profErr) throw profErr;
+
+        if (isMounted) setFollowingList((profs || []).map((p: any) => ({ ...p })));
+      } catch (e) {
+        console.error('[Blend] Error loading following list', e);
+        if (isMounted) setFollowingList([]);
+      } finally {
+        if (isMounted) setFollowingLoading(false);
+      }
+    };
+
+    loadCurrentProfile();
+    loadFollowing();
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase, user]);
 
   const handlePressUser = (otherUserId: string) => {
     router.push(`/user/${otherUserId}`);
@@ -396,6 +464,30 @@ export default function BlendScreen() {
               />
             </View>
 
+            {/* Following list */}
+            {followingLoading && !searching && (
+              <View style={styles.searchStatusRow}>
+                <ActivityIndicator size="small" />
+                <ThemedText type="default" style={styles.searchStatusText}>
+                  Loading following...
+                </ThemedText>
+              </View>
+            )}
+
+            {!followingLoading && followingList.length > 0 && (
+              <View style={styles.followingWrapper}>
+                <ThemedText type="subtitle" style={styles.sectionTitle}>
+                  Following
+                </ThemedText>
+                <FlatList
+                  data={followingList}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderUserItem}
+                  scrollEnabled={false}
+                />
+              </View>
+            )}
+
             {/* Selected users (chips) */}
             {selectedUsers.length > 0 && (
               <View style={styles.selectedRow}>
@@ -451,13 +543,13 @@ export default function BlendScreen() {
             )}
 
             {/* Search results */}
-            {results.length > 0 && (
+            {filteredResults.length > 0 && (
               <View style={styles.searchResultsWrapper}>
                 <ThemedText type="subtitle" style={styles.sectionTitle}>
                   Search results
                 </ThemedText>
                 <FlatList
-                  data={results}
+                  data={filteredResults}
                   keyExtractor={(item) => item.id}
                   renderItem={renderUserItem}
                   scrollEnabled={false}
@@ -476,7 +568,13 @@ export default function BlendScreen() {
         >
           <View style={styles.resultsHeader}>
             <ThemedText type="subtitle" style={styles.sectionTitle}>
-              Blend with {[((user as any)?.display_name || (user as any)?.email), ...selectedUsers.map((s: any) => s.display_name)].filter(Boolean).join(', ')}
+              {(() => {
+                const selfName = (currentProfile as any)?.display_name
+                  || (user as any)?.user_metadata?.full_name
+                  || (user as any)?.email;
+                const names = [selfName, ...selectedUsers.map((s: any) => s.display_name)].filter(Boolean);
+                return `Blend with ${names.join(', ')}`;
+              })()}
             </ThemedText>
             <View style={styles.resultsActions}>
               <Pressable style={styles.clearButton} onPress={() => setViewMode('search')}>
@@ -776,6 +874,10 @@ const styles = StyleSheet.create({
   searchResultsWrapper: {
     marginTop: 18,
     marginBottom: 4,
+  },
+  followingWrapper: {
+    marginTop: 8,
+    marginBottom: 12,
   },
   section: {
     marginTop: 18,
