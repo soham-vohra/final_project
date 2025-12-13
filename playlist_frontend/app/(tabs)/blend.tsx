@@ -182,7 +182,7 @@ export default function BlendScreen() {
   }, [supabase, user]);
 
   const handlePressUser = (otherUserId: string) => {
-    router.push(`/user/${otherUserId}`);
+    router.push(`/user/${otherUserId}?returnTab=blend`);
   };
 
   const handleStartBlend = (otherUser: any) => {

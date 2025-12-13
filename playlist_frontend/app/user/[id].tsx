@@ -29,7 +29,7 @@ type ProfileRow = {
 };
 
 export default function OtherUserProfileScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, returnTab } = useLocalSearchParams<{ id: string; returnTab?: string }>();
   const router = useRouter();
   const { supabase, user } = useAuth();
 
@@ -308,6 +308,24 @@ export default function OtherUserProfileScreen() {
       setFollowSubmitting(true);
       setFollowError(null);
 
+      // First check if a relationship already exists
+      const { data: existingRel } = await supabase
+        .from('user_relationships')
+        .select('id, status')
+        .eq('user_id', user.id)
+        .eq('target_user_id', id)
+        .maybeSingle();
+
+      if (existingRel) {
+        if (existingRel.status === 'accepted') {
+          setFollowStatus('following');
+          return;
+        } else if (existingRel.status === 'pending') {
+          setFollowStatus('requested');
+          return;
+        }
+      }
+
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
 
@@ -387,8 +405,13 @@ export default function OtherUserProfileScreen() {
       {/* Top bar */}
       <View style={styles.topBar}>
         <Pressable style={styles.backButton} onPress={() => {
-            // Always return to the Blend tab
-            router.replace('/(tabs)/blend');
+          if (returnTab === 'profile') {
+            router.push('/(tabs)/profile');
+          } else if (returnTab === 'blend') {
+            router.push('/(tabs)/blend');
+          } else {
+            router.back();
+          }
         }}>
           <ThemedText type="default" style={styles.backLabel}>
             ‹ Back

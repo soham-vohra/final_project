@@ -355,6 +355,20 @@ export default function ProfileScreen() {
   const followBack = async (targetUserId: string) => {
     if (!supabase || !user) return false;
     try {
+      // First check if we already follow them
+      const { data: existingRel } = await supabase
+        .from('user_relationships')
+        .select('id, status')
+        .eq('user_id', user.id)
+        .eq('target_user_id', targetUserId)
+        .maybeSingle();
+
+      if (existingRel && existingRel.status === 'accepted') {
+        // Already following them, just refresh the list
+        await loadFollowingList();
+        return true;
+      }
+
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
 
@@ -845,7 +859,7 @@ export default function ProfileScreen() {
                     style={styles.userRow}
                     onPress={() => {
                       setShowFollowersModal(false);
-                      router.push(`/user/${item.id}`);
+                      router.push(`/user/${item.id}?returnTab=profile`);
                     }}
                   >
                     <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/48' }} style={styles.userAvatar} />
@@ -881,7 +895,7 @@ export default function ProfileScreen() {
                     style={styles.userRow}
                     onPress={() => {
                       setShowFollowingModal(false);
-                      router.push(`/user/${item.id}`);
+                      router.push(`/user/${item.id}?returnTab=profile`);
                     }}
                   >
                     <Image source={{ uri: item.avatar_url || 'https://via.placeholder.com/48' }} style={styles.userAvatar} />

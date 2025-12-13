@@ -1451,27 +1451,24 @@ def request_relationship(payload: RelationshipRequestPayload):
         raise HTTPException(status_code=400, detail="Cannot follow yourself.")
 
     try:
-        # Check if any relationship already exists between these two users
+        # Check if this specific directional relationship already exists (user_id -> target_user_id)
         rel_res = (
             supabase.table("user_relationships")
-            .select("id, user_id, target_user_id, status")
+            .select("id, status")
+            .eq("user_id", payload.user_id)
+            .eq("target_user_id", payload.target_user_id)
             .execute()
         )
 
-        existing = []
-        for row in rel_res.data or []:
-            uid = row.get("user_id")
-            tid = row.get("target_user_id")
-            if {uid, tid} == {payload.user_id, payload.target_user_id}:
-                existing.append(row)
-
-        if existing:
-            # If there's an accepted relationship, treat as already friends/following
-            for row in existing:
-                if row.get("status") == "accepted":
-                    raise HTTPException(status_code=400, detail="Relationship already accepted.")
-            # Otherwise, there's a pending or blocked relationship
-            raise HTTPException(status_code=400, detail="Relationship already exists or is pending.")
+        if rel_res.data:
+            existing = rel_res.data[0]
+            status = existing.get("status")
+            if status == "accepted":
+                raise HTTPException(status_code=400, detail="You are already following this user.")
+            elif status == "pending":
+                raise HTTPException(status_code=400, detail="Follow request already pending.")
+            else:
+                raise HTTPException(status_code=400, detail="Relationship already exists.")
 
         # Insert new pending relationship
         insert_data = {
