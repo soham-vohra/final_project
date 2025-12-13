@@ -337,3 +337,175 @@ Bryan: Created the search function for movies in the gallery
 Ilias: Implemented sort function by movie release date
 
 Jaime: Added the function for users to add a new movie to their gallery 
+
+---
+
+## Additional Features
+
+### User Preferences & Personalization
+- **Vibe Quiz**: Interactive onboarding quiz that generates a personalized preference vector for each user
+- **Preference Vectors**: 10-dimensional vectors that capture user taste across multiple axes (mainstream vs arthouse, light vs dark, fast-paced vs slow-burn, etc.)
+- **Movie Vibes**: Vector embeddings for movies that enable similarity-based recommendations
+
+### Blend Recommendations
+- **Multi-User Blending**: Generate movie recommendations based on combined preferences of multiple users
+- **Smart Matching**: Uses cosine similarity between user preference vectors and movie vibe vectors
+- **Genre-Based Results**: Recommendations organized by genre with personalized match percentages
+- **Top Picks Rail**: Curated list of best matches for the group
+
+### Social Features
+- **User Relationships**: Follow/unfollow system with pending request management
+- **Following Feed**: See users you follow and discover new users to connect with
+- **Profile Views**: View other users' profiles, watchlists, and watch history
+- **Follow Requests**: Accept or reject incoming follow requests via notification bell
+
+### Movie Interactions
+- **Watch History**: Track movies you've watched with timestamps
+- **Reactions**: React to movies with like/meh/dislike and star ratings (1-5)
+- **Reviews**: Write text reviews for movies you've watched
+- **Watchlist**: Save movies to watch later with quick add/remove functionality
+
+### Search & Discovery
+- **Movie Search**: Real-time search with TMDB API integration for comprehensive movie database
+- **User Search**: Find and connect with other users by display name
+- **Auto-Ingestion**: Movies are automatically added to the database when searched
+
+---
+
+## Complete Setup Instructions
+
+### Backend Setup
+
+1. **Install Python dependencies**:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   ```
+
+2. **Configure environment variables**:
+   Create a `.env` file in the `backend` directory with:
+   ```env
+   SUPABASE_URL=your_supabase_project_url
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+   TMDB_API_KEY=your_tmdb_api_key
+   INGESTION_SECRET=your_secret_for_ingestion_endpoint
+   ```
+
+3. **Start the backend server**:
+   ```bash
+   python3 cine_api.py
+   ```
+   The server will run on `http://localhost:8000`
+
+### Frontend Setup
+
+1. **Navigate to frontend directory**:
+   ```bash
+   cd playlist_frontend
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+
+3. **Configure environment variables**:
+   Create a `.env` file in the `playlist_frontend` directory with:
+   ```env
+   EXPO_PUBLIC_API_URL=http://localhost:8000
+   EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+   ```
+
+4. **Run the iOS simulator**:
+   ```bash
+   npm run ios
+   ```
+
+### Prerequisites
+- **Node.js** and **npm** installed
+- **Python 3.7+** installed
+- **Xcode** (for iOS development)
+- **Expo CLI** (installed via npm)
+- **Supabase** project with tables set up per schema
+- **TMDB API key** (free at https://www.themoviedb.org/settings/api)
+
+### Production Deployment
+- Backend can be deployed to Railway, Heroku, or any platform supporting Python
+- Frontend can be built with Expo EAS for iOS/Android app stores
+- Update `EXPO_PUBLIC_API_URL` in frontend `.env` to point to production backend URL
+
+---
+
+## API Endpoints (Complete List)
+
+### Movies
+- `GET /movies` - List all movies
+- `POST /movies` - Add new movie
+- `POST /v1/movies/search` - Search TMDB and ingest movies
+- `POST /v1/movies/{movie_id}/watch-and-react` - Record watch + rating + reaction
+
+### User Preferences
+- `POST /v1/preferences` - Submit quiz results and generate preference vector
+- `POST /v1/preferences/batch` - Fetch preference vectors for multiple users
+
+### Recommendations
+- `POST /v1/blend/recommendations` - Generate blended recommendations for multiple users
+
+### Social/Relationships
+- `POST /v1/relationships/request` - Send follow request
+- `POST /v1/relationships/respond` - Accept or reject follow request
+
+### Watch History
+- `POST /watch_history` - Add movie to watch history
+- `GET /watch_history/count_rewatches` - Count rewatches for a movie
+
+### User Ratings
+- `POST /user_ratings` - Submit movie rating and review
+
+---
+
+## Database Tables (Additional)
+
+### user_preferences
+Stores user preference vectors from vibe quiz.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `user_id` | UUID | Foreign key → profiles.user_id |
+| `preference_vector` | FLOAT[] | 10-dimensional preference vector |
+| `quiz_version` | TEXT | Version of quiz taken |
+| `created_at` | TIMESTAMPTZ | When preferences were created |
+
+### movie_vibes
+Stores movie vibe vectors for similarity matching.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `movie_id` | UUID | Foreign key → movies.id |
+| `vibe_vector` | FLOAT[] | 10-dimensional vibe vector |
+| `created_at` | TIMESTAMPTZ | When vibe was computed |
+
+### user_relationships
+Tracks follow relationships between users.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | User initiating follow |
+| `target_user_id` | UUID | User being followed |
+| `status` | TEXT | "pending" or "accepted" |
+| `created_at` | TIMESTAMPTZ | When relationship was created |
+
+### user_movie_reactions
+Stores user reactions to movies (like/meh/dislike).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | Foreign key → profiles.user_id |
+| `movie_id` | UUID | Foreign key → movies.id |
+| `rating` | INT | Star rating (1-5) |
+| `reaction` | TEXT | "like", "meh", or "dislike" |
+| `review` | TEXT | Optional text review |
+| `created_at` | TIMESTAMPTZ | When reaction was recorded |
